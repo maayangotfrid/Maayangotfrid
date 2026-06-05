@@ -118,41 +118,50 @@ def _try_js_extraction(sb, url: str) -> dict | None:
         raw = sb.execute_script("""
             try {
                 var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
-                var c = {};
+                var rp = window.runParams || {};
+                var data = rp.data || {};
 
-                if (window.runParams) {
-                    var rp = window.runParams;
-                    c = (rp.data||{}).pageComponent
-                     || (rp.data||{}).productComponent
+                // Try all known component paths
+                var c = data.pageComponent
+                     || data.productComponent
+                     || data.itemInfoComponent
                      || rp.pageComponent
                      || rp.productComponent
-                     || rp.data
                      || {};
-                }
 
                 // Title
                 result.title = (c.titleModule||{}).subject
                              || (c.titleComponent||{}).subject
-                             || c.subject || c.title || '';
+                             || data.subject || c.subject || '';
 
-                // Price — try every known field name
-                var pm = c.priceModule || c.priceComponent || {};
-                result.price = pm.formatedActivityPrice
-                             || pm.formatedPrice
-                             || pm.minActivityAmount
-                             || pm.minAmount
-                             || pm.activityPrice
-                             || '0';
+                // Price
+                var pm = c.priceModule || c.priceComponent || data.priceModule || {};
+                result.price = pm.formatedActivityPrice || pm.formatedPrice
+                             || pm.minActivityAmount || pm.minAmount || '0';
 
                 // Images
-                result.images = ((c.imageModule||c.imageComponent||{}).imagePathList || []).slice(0,20);
+                var im = c.imageModule || c.imageComponent || data.imageModule || {};
+                result.images = (im.imagePathList || []).slice(0,20);
 
-                // Variants — try every known SKU field name
-                var sm = c.skuModule || c.skuComponent || c.specsModule || {};
-                var skuList = sm.productSKUPropertyList
-                           || sm.skuPropertyList
-                           || sm.properties
-                           || [];
+                // Variants — search at component level AND data level
+                var sm = c.skuModule || c.skuComponent
+                      || data.skuModule || data.skuComponent || {};
+                var skuList = sm.productSKUPropertyList || sm.skuPropertyList || sm.properties || [];
+
+                // If still empty, deep-search runParams for productSKUPropertyList
+                if (!skuList.length) {
+                    var found = null;
+                    function dig(obj, depth) {
+                        if (!obj || depth > 4 || typeof obj !== 'object') return;
+                        if (Array.isArray(obj.productSKUPropertyList) && obj.productSKUPropertyList.length) {
+                            found = obj.productSKUPropertyList; return;
+                        }
+                        for (var k in obj) { if (!found) dig(obj[k], depth+1); }
+                    }
+                    dig(rp, 0);
+                    if (found) skuList = found;
+                }
+
                 result.variants = skuList.map(function(p){
                     var vals = p.skuPropertyValues || p.values || p.propertyValues || [];
                     return {
@@ -164,8 +173,9 @@ def _try_js_extraction(sb, url: str) -> dict | None:
                     };
                 }).filter(function(x){ return x.v.length > 0; });
 
-                // Description
-                var dm = c.descriptionModule || c.descriptionComponent || {};
+                // Description — search multiple paths
+                var dm = c.descriptionModule || c.descriptionComponent
+                      || data.descriptionModule || {};
                 result.descUrl = dm.descriptionUrl || '';
                 result.desc = dm.description || '';
 

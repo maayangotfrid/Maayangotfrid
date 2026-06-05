@@ -278,6 +278,51 @@ def debug_scrape():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/debug-keys")
+def debug_keys():
+    """Fast debug: returns runParams structure keys only (no heavy scraping)."""
+    from scraper import _normalize_url
+    try:
+        from seleniumbase import SB
+    except ImportError:
+        return jsonify({"error": "seleniumbase not installed"}), 500
+
+    url = _normalize_url(request.args.get("url", ""))
+    if not url:
+        return jsonify({"error": "url param required"}), 400
+
+    import random, json as _json
+    try:
+        with SB(uc=True, headless=True, locale_code="en") as sb:
+            sb.open(url)
+            sb.sleep(5)
+            keys = sb.execute_script("""
+                try {
+                    var rp = window.runParams || {};
+                    var data = rp.data || {};
+                    var c = data.pageComponent || data.productComponent || rp.pageComponent || {};
+                    var sm = c.skuModule || data.skuModule || {};
+                    var skuList = sm.productSKUPropertyList || [];
+                    return JSON.stringify({
+                        hasRunParams: !!window.runParams,
+                        rpTopKeys: Object.keys(rp).slice(0,15),
+                        dataKeys: Object.keys(data).slice(0,20),
+                        compKeys: Object.keys(c).slice(0,20),
+                        skuKeys: Object.keys(sm),
+                        skuCount: skuList.length,
+                        firstSkuProp: skuList[0] ? JSON.stringify(skuList[0]).substring(0,200) : 'none',
+                        title: (c.titleModule||{}).subject || '',
+                        price: (c.priceModule||{}).formatedActivityPrice || (c.priceModule||{}).formatedPrice || '',
+                        imgCount: ((c.imageModule||{}).imagePathList||[]).length,
+                        descUrl: (c.descriptionModule||{}).descriptionUrl || ''
+                    });
+                } catch(e) { return JSON.stringify({error: e.message}); }
+            """)
+            return jsonify(_json.loads(keys))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
