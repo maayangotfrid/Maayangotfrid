@@ -191,12 +191,21 @@ def _try_html_fallback(html: str, url: str) -> dict:
                 break
 
     images = []
+    seen = set()
     for img in soup.find_all("img"):
         src = img.get("src") or img.get("data-src") or ""
-        if "alicdn" in src or "ae0" in src:
-            clean = _clean_img(src)
-            if clean and clean not in images:
-                images.append(clean)
+        if not src or ("alicdn" not in src and "ae0" not in src):
+            continue
+        # Skip small swatch/icon images (under 200x200)
+        size_m = re.search(r'_(\d+)x(\d+)', src)
+        if size_m:
+            w, h = int(size_m.group(1)), int(size_m.group(2))
+            if w < 200 or h < 200:
+                continue
+        clean = _clean_img(src)
+        if clean and clean not in seen:
+            seen.add(clean)
+            images.append(clean)
 
     return {
         "title": title, "description": "", "price": price,
