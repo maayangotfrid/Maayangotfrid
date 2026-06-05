@@ -1,6 +1,5 @@
 import re
 import json
-import time
 import random
 import requests
 from bs4 import BeautifulSoup
@@ -22,17 +21,25 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def _clean_img(url: str) -> str:
+def _clean_img(url) -> str:
     if not url:
         return ""
-    if not url.startswith("http"):
+    if isinstance(url, dict):
+        url = url.get("imageUrl") or url.get("url") or url.get("src") or ""
+    url = str(url).strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
         url = "https:" + url
-    url = re.sub(r'_\d+x\d+.*?\.(jpg|jpeg|png|webp)', r'.\1', url, flags=re.I)
+    elif not url.startswith("http"):
+        url = "https://" + url
+    # Remove size/quality suffixes
+    url = re.sub(r'[_.](\d+x\d+)[^/]*\.(jpe?g|png|webp)', r'.\2', url, flags=re.I)
+    url = re.sub(r'_Q\d+\.(jpe?g|png|webp)', r'.\1', url, flags=re.I)
     return url
 
 
 def _fetch_description(desc_url: str) -> str:
-    """Fetch description HTML from AliExpress description URL."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = requests.get(desc_url, headers=headers, timeout=10)
@@ -54,12 +61,21 @@ def _scrape_with_selenium(url: str) -> dict:
     try:
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(url)
-            sb.sleep(random.uniform(2, 4))
-            # Try to bypass any interstitial
+            sb.sleep(random.uniform(3, 5))
             try:
                 sb.click("button[data-role='close']", timeout=2)
             except Exception:
                 pass
+
+            # Scroll to trigger lazy loading
+            sb.execute_script("window.scrollTo(0, 800)")
+            sb.sleep(1)
+
+            # Primary: extract directly via JS (most reliable)
+            result = _try_js_extraction(sb, url)
+            if result and result.get("title"):
+                return result
+
             html = sb.get_page_source()
 
         result = (
@@ -73,60 +89,151 @@ def _scrape_with_selenium(url: str) -> dict:
         return {"status": "error", "message": str(e), "source_url": url}
 
 
-def _try_next_data(html: str, url: str) -> dict | None:
-    """Extract from Next.js __NEXT_DATA__ (newer AliExpress pages)."""
-    m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.+?)</script>', html, re.DOTALL)
-    if not m:
-        return None
+def _try_js_extraction(sb, url: str) -> dict | None:
+    """Extract product data by running JavaScript directly in the browser."""
     try:
-        data = json.loads(m.group(1))
+        raw = sb.execute_script("""
+            try {
+                // Try window.runParams (classic AliExpress)
+                if (window.runParams) {
+                    var rp = window.runParams;
+                    var comp = (rp.data && rp.data.pageComponent) || rp.pageComponent;
+                    if (comp && comp.titleModule && comp.titleModule.subject) {
+                        return JSON.stringify({_src: 'runParams', comp: comp});
+                    }
+                }
+
+                // Try __NEXT_DATA__
+                var el = document.getElementById('__NEXT_DATA__');
+                if (el) {
+                    return JSON.stringify({_src: 'nextData', raw: el.textContent});
+                }
+
+                // Try any script containing imagePathList
+                var scripts = document.querySelectorAll('script');
+                for (var i = 0; i < scripts.length; i++) {
+                    var t = scripts[i].textContent || '';
+                    if (t.indexOf('imagePathList') > -1 && t.indexOf('titleModule') > -1) {
+                        return JSON.stringify({_src: 'script', text: t.substring(0, 200000)});
+                    }
+                }
+                return null;
+            } catch(e) { return JSON.stringify({_src: 'error', msg: e.message}); }
+        """)
+
+        if not raw:
+            return None
+
+        data = json.loads(raw)
+        src = data.get("_src")
+
+        if src == "runParams":
+            return _parse_runparams_comp(data.get("comp", {}), url)
+
+        if src == "nextData":
+            return _parse_next_raw(data.get("raw", ""), url)
+
+        if src == "script":
+            return _try_data_from_script(data.get("text", ""), url)
+
+    except Exception:
+        pass
+    return None
+
+
+def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
+    title = comp.get("titleModule", {}).get("subject", "")
+    if not title:
+        return None
+
+    price_mod = comp.get("priceModule", {})
+    price_str = (price_mod.get("formatedActivityPrice")
+                 or price_mod.get("formatedPrice", "0"))
+    price = re.sub(r"[^\d.]", "", price_str) or "0"
+
+    # Main product images
+    images = [_clean_img(i) for i in
+              comp.get("imageModule", {}).get("imagePathList", [])]
+
+    # Add variant color images
+    for prop in comp.get("skuModule", {}).get("productSKUPropertyList", []):
+        for val in prop.get("skuPropertyValues", []):
+            img = val.get("skuPropertyImagePath", "")
+            if img:
+                c = _clean_img(img)
+                if c and c not in images:
+                    images.append(c)
+
+    variants = []
+    for prop in comp.get("skuModule", {}).get("productSKUPropertyList", []):
+        name = prop.get("skuPropertyName", "Option")
+        values = [v.get("propertyValueDisplayName", "")
+                  for v in prop.get("skuPropertyValues", [])]
+        if values:
+            variants.append({"name": name, "values": values})
+
+    desc_mod = comp.get("descriptionModule", {})
+    description = desc_mod.get("description", "")
+    if not description:
+        desc_url = desc_mod.get("descriptionUrl", "")
+        if desc_url:
+            description = _fetch_description(desc_url)
+
+    return {
+        "title": title, "description": description, "price": price,
+        "images": [i for i in images if i][:20],
+        "variants": variants, "source_url": url, "status": "ok",
+    }
+
+
+def _parse_next_raw(raw_text: str, url: str) -> dict | None:
+    try:
+        data = json.loads(raw_text)
     except Exception:
         return None
 
-    def find_deep(obj, *keys):
-        for key in keys:
-            if isinstance(obj, dict):
-                obj = obj.get(key, {})
-            else:
+    def dig(obj, *keys):
+        for k in keys:
+            if not isinstance(obj, dict):
                 return {}
+            obj = obj.get(k, {})
         return obj or {}
 
-    props = find_deep(data, "props", "pageProps")
-    product = (
-        find_deep(props, "initialData", "data", "productInfoComponent")
-        or find_deep(props, "data", "productInfoComponent")
-        or find_deep(props, "productInfo")
-        or props
+    props = dig(data, "props", "pageProps")
+    comp = (
+        dig(props, "initialData", "data", "productInfoComponent")
+        or dig(props, "data", "productInfoComponent")
+        or {}
     )
 
-    title = (product.get("subject") or product.get("title") or
-             find_deep(product, "titleModule", "subject") or "")
+    title = (comp.get("subject") or comp.get("title")
+             or dig(comp, "titleModule", "subject") or "")
     if not title or len(title) < 5:
         return None
 
-    images = []
-    img_list = (
-        find_deep(product, "imageModule", "imagePathList")
-        or find_deep(props, "initialData", "data", "imageModule", "imagePathList")
-        or []
-    )
-    if isinstance(img_list, list):
-        images = [_clean_img(i) for i in img_list if i]
-
-    price_mod = find_deep(product, "priceModule")
-    price_str = price_mod.get("formatedActivityPrice") or price_mod.get("formatedPrice", "0")
+    price_mod = dig(comp, "priceModule")
+    price_str = (price_mod.get("formatedActivityPrice")
+                 or price_mod.get("formatedPrice", "0"))
     price = re.sub(r"[^\d.]", "", price_str) or "0"
 
+    img_list = (
+        dig(comp, "imageModule", "imagePathList")
+        or dig(props, "initialData", "data", "imageModule", "imagePathList")
+        or []
+    )
+    images = [_clean_img(i) for i in img_list if i]
+
     variants = []
-    sku_props = find_deep(product, "skuModule", "productSKUPropertyList")
+    sku_props = dig(comp, "skuModule", "productSKUPropertyList")
     if isinstance(sku_props, list):
         for prop in sku_props:
             name = prop.get("skuPropertyName", "Option")
-            values = [v.get("propertyValueDisplayName", "") for v in prop.get("skuPropertyValues", [])]
+            values = [v.get("propertyValueDisplayName", "")
+                      for v in prop.get("skuPropertyValues", [])]
             if values:
                 variants.append({"name": name, "values": values})
 
-    desc_mod = find_deep(product, "descriptionModule")
+    desc_mod = dig(comp, "descriptionModule")
     description = desc_mod.get("description", "")
     if not description:
         desc_url = desc_mod.get("descriptionUrl", "")
@@ -154,43 +261,22 @@ def _try_data_from_script(html: str, url: str) -> dict | None:
         except Exception:
             continue
 
-        components = (
+        comp = (
             data.get("data", {}).get("pageComponent")
             or data.get("pageComponent")
             or {}
         )
-
-        title = components.get("titleModule", {}).get("subject", "")
-        if not title:
-            continue
-
-        price_mod = components.get("priceModule", {})
-        price_str = price_mod.get("formatedActivityPrice") or price_mod.get("formatedPrice", "0")
-        price = re.sub(r"[^\d.]", "", price_str) or "0"
-
-        images = [_clean_img(i) for i in components.get("imageModule", {}).get("imagePathList", [])]
-
-        variants = []
-        for prop in components.get("skuModule", {}).get("productSKUPropertyList", []):
-            name = prop.get("skuPropertyName", "Option")
-            values = [v.get("propertyValueDisplayName", "") for v in prop.get("skuPropertyValues", [])]
-            if values:
-                variants.append({"name": name, "values": values})
-
-        # Try inline description first, then fetch from URL
-        desc_mod = components.get("descriptionModule", {})
-        description = desc_mod.get("description", "")
-        if not description:
-            desc_url = desc_mod.get("descriptionUrl", "")
-            if desc_url:
-                description = _fetch_description(desc_url)
-
-        return {
-            "title": title, "description": description, "price": price,
-            "images": [i for i in images if i][:20],
-            "variants": variants, "source_url": url, "status": "ok",
-        }
+        if comp.get("titleModule", {}).get("subject"):
+            return _parse_runparams_comp(comp, url)
     return None
+
+
+def _try_next_data(html: str, url: str) -> dict | None:
+    m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.+?)</script>',
+                  html, re.DOTALL)
+    if not m:
+        return None
+    return _parse_next_raw(m.group(1), url)
 
 
 def _try_regex_extraction(html: str, url: str) -> dict | None:
@@ -200,12 +286,12 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
         if m:
             title = m.group(1)
             break
-
     if not title:
         return None
 
     price = "0"
-    for pat in [r'"formatedActivityPrice"\s*:\s*"([^"]+)"', r'"formatedPrice"\s*:\s*"([^"]+)"']:
+    for pat in [r'"formatedActivityPrice"\s*:\s*"([^"]+)"',
+                r'"formatedPrice"\s*:\s*"([^"]+)"']:
         p = re.search(pat, html)
         if p:
             price = re.sub(r"[^\d.]", "", p.group(1)) or "0"
@@ -220,22 +306,23 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
             pass
 
     variants = []
-    sku_match = re.search(r'"productSKUPropertyList"\s*:\s*(\[.+?\])\s*,\s*"', html, re.DOTALL)
+    sku_match = re.search(r'"productSKUPropertyList"\s*:\s*(\[.+?\])\s*,\s*"',
+                          html, re.DOTALL)
     if sku_match:
         try:
             for prop in json.loads(sku_match.group(1)):
                 name = prop.get("skuPropertyName", "Option")
-                values = [v.get("propertyValueDisplayName", "") for v in prop.get("skuPropertyValues", [])]
+                values = [v.get("propertyValueDisplayName", "")
+                          for v in prop.get("skuPropertyValues", [])]
                 if values:
                     variants.append({"name": name, "values": values})
         except Exception:
             pass
 
-    # Try to fetch description from descriptionUrl
     description = ""
-    desc_url_match = re.search(r'"descriptionUrl"\s*:\s*"([^"]+)"', html)
-    if desc_url_match:
-        description = _fetch_description(desc_url_match.group(1))
+    desc_m = re.search(r'"descriptionUrl"\s*:\s*"([^"]+)"', html)
+    if desc_m:
+        description = _fetch_description(desc_m.group(1))
 
     return {
         "title": title, "description": description, "price": price,
@@ -258,7 +345,7 @@ def _try_html_fallback(html: str, url: str) -> dict:
                 price = m.group()
                 break
 
-    # First try: find imagePathList in any script tag (most reliable)
+    # First try: find imagePathList in any script tag
     images = []
     for script in soup.find_all("script"):
         text = script.string or ""
@@ -272,18 +359,16 @@ def _try_html_fallback(html: str, url: str) -> dict:
             except Exception:
                 pass
 
-    # Second try: look for large alicdn images in HTML (skip small icons/swatches)
+    # Second try: large alicdn images only
     if not images:
         seen = set()
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
-            if not src or ("alicdn" not in src and "ae0" not in src):
+            if not src or "alicdn" not in src:
                 continue
             size_m = re.search(r'_(\d+)x(\d+)', src)
-            if size_m:
-                w, h = int(size_m.group(1)), int(size_m.group(2))
-                if w < 300 or h < 300:
-                    continue
+            if size_m and (int(size_m.group(1)) < 300 or int(size_m.group(2)) < 300):
+                continue
             clean = _clean_img(src)
             if clean and clean not in seen:
                 seen.add(clean)
@@ -319,7 +404,8 @@ def search_products(keyword: str, page: int = 1) -> list[dict]:
 
 
 def _parse_search_json(html: str) -> list[dict]:
-    m = re.search(r'"itemList"\s*:\s*\{"content"\s*:\s*(\[.+?\])\s*[,}]', html, re.DOTALL)
+    m = re.search(r'"itemList"\s*:\s*\{"content"\s*:\s*(\[.+?\])\s*[,}]',
+                  html, re.DOTALL)
     if not m:
         return []
     try:
