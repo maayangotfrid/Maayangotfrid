@@ -22,6 +22,11 @@ def _normalize_url(url: str) -> str:
 
 
 def _clean_img(url) -> str:
+    """
+    Normalise an AliExpress / alicdn image URL:
+    - protocol-relative "//cdn…" → add "https:"
+    - strip size/quality suffixes like _640x640.jpg, _Q90.jpg
+    """
     if not url:
         return ""
     if isinstance(url, dict):
@@ -33,8 +38,9 @@ def _clean_img(url) -> str:
         url = "https:" + url
     elif not url.startswith("http"):
         url = "https://" + url
-    # Remove size/quality suffixes like _640x640.jpg, _Q90.jpg, etc.
-    url = re.sub(r'[_.](\d+x\d+)[^/]*\.(jpe?g|png|webp)', r'.\2', url, flags=re.I)
+    # Remove size suffixes like _640x640.jpg or _640x640Q90.jpg
+    url = re.sub(r'_(\d+x\d+)[^/]*\.(jpe?g|png|webp)', r'.\2', url, flags=re.I)
+    # Remove quality-only suffixes like _Q90.jpg
     url = re.sub(r'_Q\d+\.(jpe?g|png|webp)', r'.\1', url, flags=re.I)
     return url
 
@@ -67,17 +73,18 @@ def _scrape_with_selenium(url: str) -> dict:
             except Exception:
                 pass
 
-            # Scroll to trigger lazy loading
+            # Scroll to trigger lazy-loading
             sb.execute_script("window.scrollTo(0, 800)")
             sb.sleep(1)
 
-            # Primary: extract minimal fields via JS (avoids truncation of huge objects)
+            # Method 1: extract MINIMAL fields in JS (avoids WebDriver truncation of huge objects)
             result = _try_js_extraction(sb, url)
             if result and result.get("title"):
                 return result
 
             html = sb.get_page_source()
 
+        # Methods 2-4 operate on raw HTML
         result = (
             _try_data_from_script(html, url)
             or _try_next_data(html, url)
@@ -91,9 +98,11 @@ def _scrape_with_selenium(url: str) -> dict:
 
 def _try_js_extraction(sb, url: str) -> dict | None:
     """
-    Extract ONLY the needed fields in JavaScript before returning,
-    so we never serialize the full runParams object (which can be
-    several MB and gets silently truncated by WebDriver).
+    Extract ONLY the needed fields in JavaScript before returning to Python,
+    so we never serialise the full runParams object (several MB → silently
+    truncated by WebDriver).
+
+    Returns a normalised product dict, or None on failure.
     """
     try:
         raw = sb.execute_script("""
@@ -123,7 +132,7 @@ def _try_js_extraction(sb, url: str) -> dict | None:
                 result.desc = dm.description || '';
                 if (result.title) return JSON.stringify(result);
 
-                // Fallback: try __NEXT_DATA__ via JS (return first 100k chars)
+                // Fallback: try __NEXT_DATA__ via JS (return first 100 k chars)
                 var el = document.getElementById('__NEXT_DATA__');
                 if (el) {
                     return JSON.stringify({_nd: el.textContent.substring(0, 100000)});
@@ -137,7 +146,7 @@ def _try_js_extraction(sb, url: str) -> dict | None:
 
         data = json.loads(raw)
 
-        # Got __NEXT_DATA__ fallback
+        # Got __NEXT_DATA__ fallback from JS
         if "_nd" in data:
             return _parse_next_raw(data["_nd"], url)
 
@@ -179,6 +188,10 @@ def _try_js_extraction(sb, url: str) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Helpers shared by multiple fallback methods
+# ---------------------------------------------------------------------------
+
 def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
     title = comp.get("titleModule", {}).get("subject", "")
     if not title:
@@ -189,11 +202,10 @@ def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
                  or price_mod.get("formatedPrice", "0"))
     price = re.sub(r"[^\d.]", "", price_str) or "0"
 
-    # Main product images
     images = [_clean_img(i) for i in
               comp.get("imageModule", {}).get("imagePathList", [])]
 
-    # Add variant color images
+    # Include variant colour swatch images
     for prop in comp.get("skuModule", {}).get("productSKUPropertyList", []):
         for val in prop.get("skuPropertyValues", []):
             img = val.get("skuPropertyImagePath", "")
@@ -218,9 +230,13 @@ def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
             description = _fetch_description(desc_url)
 
     return {
-        "title": title, "description": description, "price": price,
+        "title": title,
+        "description": description,
+        "price": price,
         "images": [i for i in images if i][:20],
-        "variants": variants, "source_url": url, "status": "ok",
+        "variants": variants,
+        "source_url": url,
+        "status": "ok",
     }
 
 
@@ -279,11 +295,19 @@ def _parse_next_raw(raw_text: str, url: str) -> dict | None:
             description = _fetch_description(desc_url)
 
     return {
-        "title": title, "description": description, "price": price,
+        "title": title,
+        "description": description,
+        "price": price,
         "images": [i for i in images if i][:20],
-        "variants": variants, "source_url": url, "status": "ok",
+        "variants": variants,
+        "source_url": url,
+        "status": "ok",
     }
 
+
+# ---------------------------------------------------------------------------
+# Fallback method 2: parse window.runParams from raw HTML source
+# ---------------------------------------------------------------------------
 
 def _try_data_from_script(html: str, url: str) -> dict | None:
     patterns = [
@@ -309,6 +333,10 @@ def _try_data_from_script(html: str, url: str) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Fallback method 3: __NEXT_DATA__ script tag in HTML
+# ---------------------------------------------------------------------------
+
 def _try_next_data(html: str, url: str) -> dict | None:
     m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.+?)</script>',
                   html, re.DOTALL)
@@ -316,6 +344,10 @@ def _try_next_data(html: str, url: str) -> dict | None:
         return None
     return _parse_next_raw(m.group(1), url)
 
+
+# ---------------------------------------------------------------------------
+# Fallback method 4: regex extraction of individual fields
+# ---------------------------------------------------------------------------
 
 def _try_regex_extraction(html: str, url: str) -> dict | None:
     title = ""
@@ -363,11 +395,19 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
         description = _fetch_description(desc_m.group(1))
 
     return {
-        "title": title, "description": description, "price": price,
-        "images": images, "variants": variants,
-        "source_url": url, "status": "ok",
+        "title": title,
+        "description": description,
+        "price": price,
+        "images": images,
+        "variants": variants,
+        "source_url": url,
+        "status": "ok",
     }
 
+
+# ---------------------------------------------------------------------------
+# Fallback method 5: plain BeautifulSoup HTML parsing
+# ---------------------------------------------------------------------------
 
 def _try_html_fallback(html: str, url: str) -> dict:
     soup = BeautifulSoup(html, "html5lib")
@@ -383,7 +423,7 @@ def _try_html_fallback(html: str, url: str) -> dict:
                 price = m.group()
                 break
 
-    # First try: find imagePathList in any script tag
+    # Try imagePathList inside any script tag first
     images = []
     for script in soup.find_all("script"):
         text = script.string or ""
@@ -397,7 +437,7 @@ def _try_html_fallback(html: str, url: str) -> dict:
             except Exception:
                 pass
 
-    # Second try: large alicdn images only
+    # Fallback: large alicdn <img> tags
     if not images:
         seen = set()
         for img in soup.find_all("img"):
@@ -414,17 +454,26 @@ def _try_html_fallback(html: str, url: str) -> dict:
         images = images[:20]
 
     return {
-        "title": title, "description": "", "price": price,
-        "images": images, "variants": [],
-        "source_url": url, "status": "ok",
+        "title": title,
+        "description": "",
+        "price": price,
+        "images": images,
+        "variants": [],
+        "source_url": url,
+        "status": "ok",
     }
 
+
+# ---------------------------------------------------------------------------
+# Product search
+# ---------------------------------------------------------------------------
 
 def search_products(keyword: str, page: int = 1) -> list[dict]:
     if not SELENIUM_AVAILABLE:
         return []
 
-    url = f"https://www.aliexpress.com/wholesale?SearchText={requests.utils.quote(keyword)}&page={page}"
+    url = (f"https://www.aliexpress.com/wholesale"
+           f"?SearchText={requests.utils.quote(keyword)}&page={page}")
     try:
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(url)
