@@ -911,13 +911,13 @@
           <!-- Vendor -->
           <div class="form-row-1 form-group">
             <label>ספק (Vendor)</label>
-            <input type="text" id="s-vendor" value="AliExpress" />
+            <input type="text" id="s-vendor" value="STEPUP SHOES" />
           </div>
 
           <!-- Product type -->
           <div class="form-row-1 form-group">
             <label>סוג מוצר (Product Type)</label>
-            <input type="text" id="s-product-type" placeholder="לדוגמה: נעליים" />
+            <input type="text" id="s-product-type" value="נעליים" />
           </div>
 
           <!-- Collection + Status -->
@@ -940,7 +940,7 @@
           <!-- Tags -->
           <div class="form-row-1 form-group">
             <label>תגים (Tags) — מופרדים בפסיקים</label>
-            <input type="text" id="s-tags" placeholder="aliexpress, נעלי ספורט, קיץ" />
+            <input type="text" id="s-tags" value="נעליים מגביהות, סגנון אלגנטי, קלאסי, נעליים לשיפור יציבה, נעליים לסתרת, נעליות אופנתיות, נעליים לגברים, נוחות והגבהה, נעלי סניקרס, מגביהות, מחאים לכל אירוע, מחיר משתלם, הגבהה לנעליים, יומיומי, חדש, ילדים, בטחון, בטחון עצמי, איסוף עצמי, איכות גבוהה" />
           </div>
 
           <!-- Publish to all channels -->
@@ -1203,9 +1203,9 @@ function renderProduct(p) {
   // --- Pre-fill import settings ---
   document.getElementById('s-seo-title').value = p.title || '';
   document.getElementById('s-seo-desc').value = '';
-  document.getElementById('s-tags').value = 'aliexpress, imported';
-  document.getElementById('s-vendor').value = 'AliExpress';
-  document.getElementById('s-product-type').value = '';
+  document.getElementById('s-tags').value = 'נעליים מגביהות, סגנון אלגנטי, קלאסי, נעליים לשיפור יציבה, נעליים לסתרת, נעליות אופנתיות, נעליים לגברים, נוחות והגבהה, נעלי סניקרס, מגביהות, מחאים לכל אירוע, מחיר משתלם, הגבהה לנעליים, יומיומי, חדש, ילדים, בטחון, בטחון עצמי, איסוף עצמי, איכות גבוהה';
+  document.getElementById('s-vendor').value = 'STEPUP SHOES';
+  document.getElementById('s-product-type').value = 'נעליים';
   document.getElementById('mf-list').innerHTML = '';
 
   // Clear previous result
@@ -1484,8 +1484,9 @@ async function importSearchSelected() {
     ...searchProducts[i],
     collection_id: collectionId || null,
     publish_status: publishStatus,
-    vendor: 'AliExpress',
-    tags: 'aliexpress, imported',
+    vendor: 'STEPUP SHOES',
+    product_type: 'נעליים',
+    tags: 'נעליים מגביהות, סגנון אלגנטי, קלאסי, נעליים לשיפור יציבה, נעליים לסתרת, נעליות אופנתיות, נעליים לגברים, נוחות והגבהה, נעלי סניקרס, מגביהות, מחאים לכל אירוע, מחיר משתלם, הגבהה לנעליים, יומיומי, חדש, ילדים, בטחון, בטחון עצמי, איסוף עצמי, איכות גבוהה',
   }));
 
   try {
