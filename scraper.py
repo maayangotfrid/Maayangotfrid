@@ -64,12 +64,80 @@ def _scrape_with_selenium(url: str) -> dict:
 
         result = (
             _try_data_from_script(html, url)
+            or _try_next_data(html, url)
             or _try_regex_extraction(html, url)
             or _try_html_fallback(html, url)
         )
         return result
     except Exception as e:
         return {"status": "error", "message": str(e), "source_url": url}
+
+
+def _try_next_data(html: str, url: str) -> dict | None:
+    """Extract from Next.js __NEXT_DATA__ (newer AliExpress pages)."""
+    m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.+?)</script>', html, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+
+    def find_deep(obj, *keys):
+        for key in keys:
+            if isinstance(obj, dict):
+                obj = obj.get(key, {})
+            else:
+                return {}
+        return obj or {}
+
+    props = find_deep(data, "props", "pageProps")
+    product = (
+        find_deep(props, "initialData", "data", "productInfoComponent")
+        or find_deep(props, "data", "productInfoComponent")
+        or find_deep(props, "productInfo")
+        or props
+    )
+
+    title = (product.get("subject") or product.get("title") or
+             find_deep(product, "titleModule", "subject") or "")
+    if not title or len(title) < 5:
+        return None
+
+    images = []
+    img_list = (
+        find_deep(product, "imageModule", "imagePathList")
+        or find_deep(props, "initialData", "data", "imageModule", "imagePathList")
+        or []
+    )
+    if isinstance(img_list, list):
+        images = [_clean_img(i) for i in img_list if i]
+
+    price_mod = find_deep(product, "priceModule")
+    price_str = price_mod.get("formatedActivityPrice") or price_mod.get("formatedPrice", "0")
+    price = re.sub(r"[^\d.]", "", price_str) or "0"
+
+    variants = []
+    sku_props = find_deep(product, "skuModule", "productSKUPropertyList")
+    if isinstance(sku_props, list):
+        for prop in sku_props:
+            name = prop.get("skuPropertyName", "Option")
+            values = [v.get("propertyValueDisplayName", "") for v in prop.get("skuPropertyValues", [])]
+            if values:
+                variants.append({"name": name, "values": values})
+
+    desc_mod = find_deep(product, "descriptionModule")
+    description = desc_mod.get("description", "")
+    if not description:
+        desc_url = desc_mod.get("descriptionUrl", "")
+        if desc_url:
+            description = _fetch_description(desc_url)
+
+    return {
+        "title": title, "description": description, "price": price,
+        "images": [i for i in images if i][:20],
+        "variants": variants, "source_url": url, "status": "ok",
+    }
 
 
 def _try_data_from_script(html: str, url: str) -> dict | None:
@@ -190,26 +258,41 @@ def _try_html_fallback(html: str, url: str) -> dict:
                 price = m.group()
                 break
 
+    # First try: find imagePathList in any script tag (most reliable)
     images = []
-    seen = set()
-    for img in soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or ""
-        if not src or ("alicdn" not in src and "ae0" not in src):
-            continue
-        # Skip small swatch/icon images (under 200x200)
-        size_m = re.search(r'_(\d+)x(\d+)', src)
-        if size_m:
-            w, h = int(size_m.group(1)), int(size_m.group(2))
-            if w < 200 or h < 200:
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        img_m = re.search(r'"imagePathList"\s*:\s*(\[[^\]]{20,}\])', text)
+        if img_m:
+            try:
+                imgs = json.loads(img_m.group(1))
+                images = [_clean_img(i) for i in imgs if i][:20]
+                if images:
+                    break
+            except Exception:
+                pass
+
+    # Second try: look for large alicdn images in HTML (skip small icons/swatches)
+    if not images:
+        seen = set()
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src") or ""
+            if not src or ("alicdn" not in src and "ae0" not in src):
                 continue
-        clean = _clean_img(src)
-        if clean and clean not in seen:
-            seen.add(clean)
-            images.append(clean)
+            size_m = re.search(r'_(\d+)x(\d+)', src)
+            if size_m:
+                w, h = int(size_m.group(1)), int(size_m.group(2))
+                if w < 300 or h < 300:
+                    continue
+            clean = _clean_img(src)
+            if clean and clean not in seen:
+                seen.add(clean)
+                images.append(clean)
+        images = images[:20]
 
     return {
         "title": title, "description": "", "price": price,
-        "images": images[:20], "variants": [],
+        "images": images, "variants": [],
         "source_url": url, "status": "ok",
     }
 
