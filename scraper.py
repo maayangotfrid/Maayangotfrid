@@ -46,11 +46,21 @@ def _clean_img(url) -> str:
 
 
 def _fetch_description(desc_url: str) -> str:
+    """Fetch description HTML from AliExpress, fixing relative image URLs."""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(desc_url, headers=headers, timeout=10)
-        if r.ok:
-            return r.text
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.aliexpress.com/",
+        }
+        r = requests.get(desc_url, headers=headers, timeout=15)
+        if not r.ok:
+            return ""
+        html = r.text
+        # Fix protocol-relative image src: //cdn... → https://cdn...
+        html = re.sub(r'src=["\']\/\/', 'src="https://', html)
+        # Remove script tags from description HTML
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.I)
+        return html
     except Exception:
         pass
     return ""
@@ -109,34 +119,61 @@ def _try_js_extraction(sb, url: str) -> dict | None:
             try {
                 var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
                 var c = {};
+
                 if (window.runParams) {
-                    c = (window.runParams.data||{}).pageComponent || window.runParams.pageComponent || {};
+                    var rp = window.runParams;
+                    c = (rp.data||{}).pageComponent
+                     || (rp.data||{}).productComponent
+                     || rp.pageComponent
+                     || rp.productComponent
+                     || rp.data
+                     || {};
                 }
-                var tm = c.titleModule || {};
-                result.title = tm.subject || '';
-                var pm = c.priceModule || {};
-                result.price = pm.formatedActivityPrice || pm.formatedPrice || '0';
-                var im = c.imageModule || {};
-                result.images = (im.imagePathList || []).slice(0, 20);
-                var sm = c.skuModule || {};
-                result.variants = (sm.productSKUPropertyList || []).map(function(p){
+
+                // Title
+                result.title = (c.titleModule||{}).subject
+                             || (c.titleComponent||{}).subject
+                             || c.subject || c.title || '';
+
+                // Price — try every known field name
+                var pm = c.priceModule || c.priceComponent || {};
+                result.price = pm.formatedActivityPrice
+                             || pm.formatedPrice
+                             || pm.minActivityAmount
+                             || pm.minAmount
+                             || pm.activityPrice
+                             || '0';
+
+                // Images
+                result.images = ((c.imageModule||c.imageComponent||{}).imagePathList || []).slice(0,20);
+
+                // Variants — try every known SKU field name
+                var sm = c.skuModule || c.skuComponent || c.specsModule || {};
+                var skuList = sm.productSKUPropertyList
+                           || sm.skuPropertyList
+                           || sm.properties
+                           || [];
+                result.variants = skuList.map(function(p){
+                    var vals = p.skuPropertyValues || p.values || p.propertyValues || [];
                     return {
-                        n: p.skuPropertyName || 'Option',
-                        v: (p.skuPropertyValues || []).map(function(v){
-                            return v.propertyValueDisplayName || '';
+                        n: p.skuPropertyName || p.name || p.propertyName || 'Option',
+                        v: vals.map(function(v){
+                            return v.propertyValueDisplayName || v.displayName
+                                || v.propertyValueName || v.name || '';
                         }).filter(Boolean)
                     };
                 }).filter(function(x){ return x.v.length > 0; });
-                var dm = c.descriptionModule || {};
+
+                // Description
+                var dm = c.descriptionModule || c.descriptionComponent || {};
                 result.descUrl = dm.descriptionUrl || '';
                 result.desc = dm.description || '';
+
                 if (result.title) return JSON.stringify(result);
 
-                // Fallback: try __NEXT_DATA__ via JS (return first 100 k chars)
+                // Fallback: __NEXT_DATA__
                 var el = document.getElementById('__NEXT_DATA__');
-                if (el) {
-                    return JSON.stringify({_nd: el.textContent.substring(0, 100000)});
-                }
+                if (el) return JSON.stringify({_nd: el.textContent.substring(0,100000)});
                 return null;
             } catch(e) { return null; }
         """)

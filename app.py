@@ -262,6 +262,23 @@ def download_images():
 
 
 # ---------------------------------------------------------------------------
+# Debug endpoint — returns raw scraped dict so you can see what was extracted
+# ---------------------------------------------------------------------------
+
+@app.route("/api/debug-scrape", methods=["POST"])
+def debug_scrape():
+    data = request.json or {}
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "URL required"}), 400
+    try:
+        result = scrape_product(url)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     app.run(debug=True, port=5050)
