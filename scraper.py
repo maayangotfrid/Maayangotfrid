@@ -33,7 +33,7 @@ def _clean_img(url) -> str:
         url = "https:" + url
     elif not url.startswith("http"):
         url = "https://" + url
-    # Remove size/quality suffixes
+    # Remove size/quality suffixes like _640x640.jpg, _Q90.jpg, etc.
     url = re.sub(r'[_.](\d+x\d+)[^/]*\.(jpe?g|png|webp)', r'.\2', url, flags=re.I)
     url = re.sub(r'_Q\d+\.(jpe?g|png|webp)', r'.\1', url, flags=re.I)
     return url
@@ -71,7 +71,7 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.execute_script("window.scrollTo(0, 800)")
             sb.sleep(1)
 
-            # Primary: extract directly via JS (most reliable)
+            # Primary: extract minimal fields via JS (avoids truncation of huge objects)
             result = _try_js_extraction(sb, url)
             if result and result.get("title"):
                 return result
@@ -90,51 +90,89 @@ def _scrape_with_selenium(url: str) -> dict:
 
 
 def _try_js_extraction(sb, url: str) -> dict | None:
-    """Extract product data by running JavaScript directly in the browser."""
+    """
+    Extract ONLY the needed fields in JavaScript before returning,
+    so we never serialize the full runParams object (which can be
+    several MB and gets silently truncated by WebDriver).
+    """
     try:
         raw = sb.execute_script("""
             try {
-                // Try window.runParams (classic AliExpress)
+                var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
+                var c = {};
                 if (window.runParams) {
-                    var rp = window.runParams;
-                    var comp = (rp.data && rp.data.pageComponent) || rp.pageComponent;
-                    if (comp && comp.titleModule && comp.titleModule.subject) {
-                        return JSON.stringify({_src: 'runParams', comp: comp});
-                    }
+                    c = (window.runParams.data||{}).pageComponent || window.runParams.pageComponent || {};
                 }
+                var tm = c.titleModule || {};
+                result.title = tm.subject || '';
+                var pm = c.priceModule || {};
+                result.price = pm.formatedActivityPrice || pm.formatedPrice || '0';
+                var im = c.imageModule || {};
+                result.images = (im.imagePathList || []).slice(0, 20);
+                var sm = c.skuModule || {};
+                result.variants = (sm.productSKUPropertyList || []).map(function(p){
+                    return {
+                        n: p.skuPropertyName || 'Option',
+                        v: (p.skuPropertyValues || []).map(function(v){
+                            return v.propertyValueDisplayName || '';
+                        }).filter(Boolean)
+                    };
+                }).filter(function(x){ return x.v.length > 0; });
+                var dm = c.descriptionModule || {};
+                result.descUrl = dm.descriptionUrl || '';
+                result.desc = dm.description || '';
+                if (result.title) return JSON.stringify(result);
 
-                // Try __NEXT_DATA__
+                // Fallback: try __NEXT_DATA__ via JS (return first 100k chars)
                 var el = document.getElementById('__NEXT_DATA__');
                 if (el) {
-                    return JSON.stringify({_src: 'nextData', raw: el.textContent});
-                }
-
-                // Try any script containing imagePathList
-                var scripts = document.querySelectorAll('script');
-                for (var i = 0; i < scripts.length; i++) {
-                    var t = scripts[i].textContent || '';
-                    if (t.indexOf('imagePathList') > -1 && t.indexOf('titleModule') > -1) {
-                        return JSON.stringify({_src: 'script', text: t.substring(0, 200000)});
-                    }
+                    return JSON.stringify({_nd: el.textContent.substring(0, 100000)});
                 }
                 return null;
-            } catch(e) { return JSON.stringify({_src: 'error', msg: e.message}); }
+            } catch(e) { return null; }
         """)
 
         if not raw:
             return None
 
         data = json.loads(raw)
-        src = data.get("_src")
 
-        if src == "runParams":
-            return _parse_runparams_comp(data.get("comp", {}), url)
+        # Got __NEXT_DATA__ fallback
+        if "_nd" in data:
+            return _parse_next_raw(data["_nd"], url)
 
-        if src == "nextData":
-            return _parse_next_raw(data.get("raw", ""), url)
+        # Got minimal runParams fields directly
+        title = data.get("title", "")
+        if not title:
+            return None
 
-        if src == "script":
-            return _try_data_from_script(data.get("text", ""), url)
+        price_str = data.get("price", "0")
+        price = re.sub(r"[^\d.]", "", price_str) or "0"
+
+        images = [_clean_img(i) for i in data.get("images", []) if i]
+
+        variants = []
+        for item in data.get("variants", []):
+            name = item.get("n", "Option")
+            values = [v for v in item.get("v", []) if v]
+            if values:
+                variants.append({"name": name, "values": values})
+
+        description = data.get("desc", "")
+        if not description:
+            desc_url = data.get("descUrl", "")
+            if desc_url:
+                description = _fetch_description(desc_url)
+
+        return {
+            "title": title,
+            "description": description,
+            "price": price,
+            "images": [i for i in images if i][:20],
+            "variants": variants,
+            "source_url": url,
+            "status": "ok",
+        }
 
     except Exception:
         pass

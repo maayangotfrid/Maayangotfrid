@@ -1,7 +1,9 @@
 import csv
 import io
 import json
-from flask import Flask, render_template, request, jsonify
+import zipfile
+import requests as req_lib
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from scraper import scrape_product, search_products
 import shopify_api
 
@@ -103,6 +105,107 @@ def import_to_shopify():
             results.append({"status": "error", "title": product.get("title", "?"), "message": str(e)})
 
     return jsonify({"results": results})
+
+
+@app.route("/api/proxy-image")
+def proxy_image():
+    """
+    Proxy an image from AliExpress CDN so the browser never hits CORS issues.
+    Usage: /api/proxy-image?url=https%3A%2F%2Fae01.alicdn.com%2F...
+    """
+    image_url = request.args.get("url", "").strip()
+    if not image_url:
+        return jsonify({"error": "url parameter is required"}), 400
+
+    # Basic allow-list: only proxy alicdn / aliexpress domains
+    allowed_hosts = ("alicdn.com", "aliexpress.com", "ae01.alicdn.com",
+                     "ae02.alicdn.com", "ae03.alicdn.com", "ae04.alicdn.com")
+    from urllib.parse import urlparse
+    parsed = urlparse(image_url)
+    host = parsed.netloc.lower()
+    if not any(host.endswith(h) for h in allowed_hosts):
+        return jsonify({"error": "Domain not allowed"}), 403
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.aliexpress.com/",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        upstream = req_lib.get(image_url, headers=headers, stream=True, timeout=15)
+        upstream.raise_for_status()
+
+        content_type = upstream.headers.get("Content-Type", "image/jpeg")
+
+        def generate():
+            for chunk in upstream.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        return Response(
+            stream_with_context(generate()),
+            content_type=content_type,
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    except req_lib.exceptions.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/download-images", methods=["POST"])
+def download_images():
+    """
+    Accept a list of image URLs and a product title.
+    Download all images and return them as a ZIP file.
+    Body: { "images": ["https://..."], "title": "Product Name" }
+    """
+    data = request.json or {}
+    images = data.get("images", [])
+    title = data.get("title", "product").strip() or "product"
+
+    if not images:
+        return jsonify({"error": "No images provided"}), 400
+
+    # Sanitise filename
+    safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:60].strip()
+
+    zip_buffer = io.BytesIO()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.aliexpress.com/",
+    }
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, img_url in enumerate(images[:30], start=1):
+            try:
+                r = req_lib.get(img_url, headers=headers, timeout=15)
+                r.raise_for_status()
+                # Determine extension from Content-Type or URL
+                ct = r.headers.get("Content-Type", "image/jpeg")
+                if "png" in ct:
+                    ext = "png"
+                elif "webp" in ct:
+                    ext = "webp"
+                else:
+                    ext = "jpg"
+                filename = f"{safe_title}_{idx:02d}.{ext}"
+                zf.writestr(filename, r.content)
+            except Exception:
+                # Skip failed images silently
+                continue
+
+    zip_buffer.seek(0)
+    zip_filename = f"{safe_title}_images.zip"
+    return Response(
+        zip_buffer.read(),
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 if __name__ == "__main__":
