@@ -293,20 +293,24 @@ def debug_keys():
                 (function() {
                     try {
                         var rp=window.runParams||{},d=rp.data||{};
-                        var c=d.pageComponent||d.productComponent||rp.pageComponent||{};
-                        var sm=c.skuModule||d.skuModule||{};
-                        var sl=sm.productSKUPropertyList||[];
+                        var c=d.pageComponent||d.productComponent||d.itemInfoComponent||rp.pageComponent||rp.productComponent||{};
+                        var sm=c.skuModule||c.skuComponent||d.skuModule||d.skuComponent||{};
+                        var sl=sm.productSKUPropertyList||sm.skuPropertyList||[];
+                        var pm=c.priceModule||c.priceComponent||d.priceModule||{};
+                        var im=c.imageModule||c.imageComponent||d.imageModule||{};
+                        var dm=c.descriptionModule||c.descriptionComponent||d.descriptionModule||{};
                         return JSON.stringify({
                             rpKeys:Object.keys(rp),
-                            dKeys:Object.keys(d).slice(0,25),
-                            cKeys:Object.keys(c).slice(0,25),
+                            dKeys:Object.keys(d).slice(0,30),
+                            cKeys:Object.keys(c).slice(0,30),
                             smKeys:Object.keys(sm),
                             skuLen:sl.length,
-                            firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,300):'empty',
-                            title:(c.titleModule||{}).subject||'',
-                            price:(c.priceModule||{}).formatedActivityPrice||(c.priceModule||{}).formatedPrice||'',
-                            imgLen:((c.imageModule||{}).imagePathList||[]).length,
-                            descUrl:(c.descriptionModule||{}).descriptionUrl||''
+                            firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,500):'empty',
+                            title:(c.titleModule||c.titleComponent||{}).subject||d.subject||c.subject||'',
+                            price:pm.formatedActivityPrice||pm.formatedPrice||pm.minActivityAmount||pm.minAmount||'',
+                            imgLen:(im.imagePathList||[]).length,
+                            descUrl:dm.descriptionUrl||'',
+                            hasDesc:!!(dm.description)
                         });
                     } catch(e){return JSON.stringify({jsError:e.message});}
                 })()

@@ -116,7 +116,7 @@ def _try_js_extraction(sb, url: str) -> dict | None:
     """
     try:
         raw = sb.execute_script("""
-            return (function() {
+            (function() {
                 try {
                     var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
                     var rp = window.runParams || {};
