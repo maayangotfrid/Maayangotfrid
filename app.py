@@ -280,23 +280,25 @@ def debug_scrape():
 
 @app.route("/api/debug-keys")
 def debug_keys():
-    """Fast debug: returns runParams structure keys only (no heavy scraping)."""
-    from scraper import _normalize_url
+    """Fast debug: returns runParams structure keys only."""
+    import re as _re
+    import json as _json
     try:
         from seleniumbase import SB
     except ImportError:
         return jsonify({"error": "seleniumbase not installed"}), 500
 
-    url = _normalize_url(request.args.get("url", ""))
+    raw_url = request.args.get("url", "")
+    m = _re.search(r'/item/(\d+)', raw_url)
+    url = f"https://www.aliexpress.com/item/{m.group(1)}.html" if m else raw_url
     if not url:
         return jsonify({"error": "url param required"}), 400
 
-    import random, json as _json
     try:
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(url)
-            sb.sleep(5)
-            keys = sb.execute_script("""
+            sb.sleep(6)
+            result = sb.execute_script("""
                 try {
                     var rp = window.runParams || {};
                     var data = rp.data || {};
@@ -310,7 +312,7 @@ def debug_keys():
                         compKeys: Object.keys(c).slice(0,20),
                         skuKeys: Object.keys(sm),
                         skuCount: skuList.length,
-                        firstSkuProp: skuList[0] ? JSON.stringify(skuList[0]).substring(0,200) : 'none',
+                        firstSkuProp: skuList[0] ? JSON.stringify(skuList[0]).substring(0,300) : 'none',
                         title: (c.titleModule||{}).subject || '',
                         price: (c.priceModule||{}).formatedActivityPrice || (c.priceModule||{}).formatedPrice || '',
                         imgCount: ((c.imageModule||{}).imagePathList||[]).length,
@@ -318,7 +320,7 @@ def debug_keys():
                     });
                 } catch(e) { return JSON.stringify({error: e.message}); }
             """)
-            return jsonify(_json.loads(keys))
+            return jsonify(_json.loads(result) if result else {"error": "no result"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
