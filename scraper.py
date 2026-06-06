@@ -72,26 +72,60 @@ _JS_INJECT_INTERCEPTOR = """
 (function() {
     if (window.__ae_desc_urls) return;
     window.__ae_desc_urls = [];
+    window.__ae_all_iframes = [];
+
     function _capture(url) {
-        if (!url || typeof url !== 'string') return;
+        if (!url || typeof url !== 'string' || url.length < 10) return;
+        // Capture any iframe URL (broad — we filter in Python)
+        if (url.indexOf('http') === 0 || url.indexOf('//') === 0) {
+            if (window.__ae_all_iframes.indexOf(url) === -1) window.__ae_all_iframes.push(url);
+        }
         var u = url.toLowerCase();
         if (u.indexOf('aeproductsourcesite') > -1 || u.indexOf('desc.htm') > -1
                 || (u.indexOf('alicdn') > -1 && u.indexOf('desc') > -1)) {
-            window.__ae_desc_urls.push(url);
+            if (window.__ae_desc_urls.indexOf(url) === -1) window.__ae_desc_urls.push(url);
         }
     }
+
+    // 1. XHR intercept
     var origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
-        _capture(url);
+        _capture(String(url || ''));
         return origOpen.apply(this, arguments);
     };
+
+    // 2. fetch intercept
     var origFetch = window.fetch;
     if (origFetch) {
         window.fetch = function(input, opts) {
-            _capture(typeof input === 'string' ? input : (input && input.url) || '');
+            _capture(typeof input === 'string' ? input : ((input && input.url) || ''));
             return origFetch.apply(this, arguments);
         };
     }
+
+    // 3. MutationObserver — watch for iframes added to DOM
+    try {
+        function _checkNode(node) {
+            if (!node || node.nodeType !== 1) return;
+            if (node.tagName === 'IFRAME') {
+                _capture(node.src || node.getAttribute('src') || node.getAttribute('data-src') || '');
+            }
+            var inner = node.querySelectorAll ? node.querySelectorAll('iframe') : [];
+            for (var i = 0; i < inner.length; i++) {
+                _capture(inner[i].src || inner[i].getAttribute('src') || inner[i].getAttribute('data-src') || '');
+            }
+        }
+        var mo = new MutationObserver(function(muts) {
+            muts.forEach(function(m) {
+                m.addedNodes.forEach(_checkNode);
+                if (m.type === 'attributes' && m.target.tagName === 'IFRAME') {
+                    _capture(m.target.src || m.target.getAttribute('src') || '');
+                }
+            });
+        });
+        mo.observe(document.documentElement, {childList: true, subtree: true, attributes: true, attributeFilter: ['src','data-src']});
+        window.__ae_mo = mo;
+    } catch(eMo) {}
 })();
 """
 
@@ -141,10 +175,20 @@ _JS_EXTRACTION = """
     try {
         var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
 
-        // ── 0. XHR/fetch interceptor capture (injected before scroll) ────────
+        // ── 0. XHR/fetch/MutationObserver capture (injected before scroll) ──
         try {
             if (window.__ae_desc_urls && window.__ae_desc_urls.length > 0) {
                 result.descUrl = window.__ae_desc_urls[0];
+            }
+            // Also expose all captured iframe URLs for debug
+            if (!result.descUrl && window.__ae_all_iframes && window.__ae_all_iframes.length > 0) {
+                result.allIframes = window.__ae_all_iframes.slice(0, 10);
+                for (var ai = 0; ai < window.__ae_all_iframes.length; ai++) {
+                    var aiu = window.__ae_all_iframes[ai].toLowerCase();
+                    if (aiu.indexOf('aeproductsourcesite') > -1 || aiu.indexOf('desc') > -1) {
+                        result.descUrl = window.__ae_all_iframes[ai]; break;
+                    }
+                }
             }
         } catch(eI) {}
 
@@ -267,15 +311,15 @@ _JS_EXTRACTION = """
             } catch(ePerf) {}
         }
 
-        // Description: try lazy iframes
+        // Description: scan all iframes in DOM (no URL filter — capture any)
         if (!result.descUrl) {
             var frames = document.querySelectorAll('iframe');
+            result.iframesFound = [];
             for (var fi = 0; fi < frames.length; fi++) {
-                var fsrc = frames[fi].src || frames[fi].getAttribute('data-src') || '';
-                if (fsrc && fsrc.length > 20
-                    && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1
-                        || fsrc.indexOf('ae01') > -1 || fsrc.indexOf('ae02') > -1)) {
-                    result.descUrl = fsrc; break;
+                var fsrc = frames[fi].src || frames[fi].getAttribute('src') || frames[fi].getAttribute('data-src') || '';
+                if (fsrc && fsrc.length > 10) {
+                    result.iframesFound.push(fsrc);
+                    if (!result.descUrl) result.descUrl = fsrc;
                 }
             }
         }
@@ -377,6 +421,8 @@ def _try_js_extraction(sb, url: str) -> dict | None:
             "description": description,
             "price": price,
             "_desc_url": desc_url,  # debug
+            "_all_iframes": data.get("iframesFound", []),  # debug
+            "_captured_iframes": data.get("allIframes", []),  # debug
             "images": [i for i in images if i][:20],
             "variants": variants,
             "source_url": url,
