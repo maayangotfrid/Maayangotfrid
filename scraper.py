@@ -201,7 +201,7 @@ _JS_EXTRACTION = """
                 }
             }
         }
-        // Description: look for it inside any div with description-related class
+        // Description: look for iframe in description-related containers
         if (!result.descUrl) {
             var descDivs = document.querySelectorAll(
                 '[class*="description"] iframe, [class*="detail-desc"] iframe, [id*="desc"] iframe'
@@ -209,6 +209,18 @@ _JS_EXTRACTION = """
             if (descDivs.length) {
                 var ds = descDivs[0].src || descDivs[0].getAttribute('data-src') || '';
                 if (ds) result.descUrl = ds;
+            }
+        }
+        // Description: try inline DOM content (new AliExpress renders desc inline)
+        if (!result.desc) {
+            var descContainers = document.querySelectorAll(
+                '[class*="desc-content"], [class*="description-content"], ' +
+                '[class*="product-description"], [class*="detail-desc-content"], ' +
+                '[class*="pdp-comp-product-description"], [id*="product-description"]'
+            );
+            for (var dci = 0; dci < descContainers.length; dci++) {
+                var dcHtml = descContainers[dci].innerHTML || '';
+                if (dcHtml.length > 200) { result.desc = dcHtml.substring(0, 60000); break; }
             }
         }
 
@@ -278,15 +290,15 @@ def _try_js_extraction(sb, url: str) -> dict | None:
                 variants.append({"name": name, "values": values})
 
         description = data.get("desc", "")
-        if not description:
-            desc_url = data.get("descUrl", "")
-            if desc_url:
-                description = _fetch_description(desc_url)
+        desc_url = data.get("descUrl", "")
+        if not description and desc_url:
+            description = _fetch_description(desc_url)
 
         return {
             "title": title,
             "description": description,
             "price": price,
+            "_desc_url": desc_url,  # debug
             "images": [i for i in images if i][:20],
             "variants": variants,
             "source_url": url,
