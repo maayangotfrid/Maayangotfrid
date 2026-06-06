@@ -278,6 +278,44 @@ def debug_scrape():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/debug-desc-url")
+def debug_desc_url():
+    """Render the product page and return any description-related URLs found in the HTML."""
+    try:
+        from seleniumbase import SB
+        import re as _re
+        url = request.args.get("url", "")
+        m = _re.search(r'/item/(\d+)', url)
+        item_id = m.group(1) if m else ""
+        norm = f"https://www.aliexpress.com/item/{item_id}.html" if item_id else url
+        with SB(uc=True, headless=True, locale_code="en") as sb:
+            sb.open(norm)
+            sb.sleep(4)
+            sb.set_window_size(1920, 1080)
+            sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            sb.sleep(3)
+            sb.execute_script("window.scrollTo(0, Math.floor(document.body.scrollHeight*0.85))")
+            sb.sleep(3)
+            html = sb.get_page_source()
+
+        found = {}
+        found["desc_htm"] = list(set(_re.findall(
+            r'https?:[\\/]*[^\s"\'<>]*desc\.htm[^\s"\'<>]*', html)))[:5]
+        found["aeproductsourcesite"] = list(set(_re.findall(
+            r'aeproductsourcesite[^\s"\'<>]{0,200}', html)))[:5]
+        found["descriptionUrl_keys"] = list(set(_re.findall(
+            r'"descriptionUrl"\s*:\s*"([^"]{5,200})"', html)))[:5]
+        found["any_description_url"] = list(set(_re.findall(
+            r'https?:[\\/]*[^\s"\'<>]*[Dd]escription[^\s"\'<>]*', html)))[:8]
+        found["has_descriptionKey"] = 'descriptionKey' in html
+        found["html_len"] = len(html)
+        found["item_id"] = item_id
+        return jsonify(found)
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
+
 @app.route("/api/debug-keys")
 def debug_keys():
     try:
