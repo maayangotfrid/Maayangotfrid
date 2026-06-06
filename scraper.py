@@ -185,6 +185,71 @@ def _try_js_extraction(sb, url: str) -> dict | None:
                     // Fallback: __NEXT_DATA__
                     var el = document.getElementById('__NEXT_DATA__');
                     if (el) return JSON.stringify({_nd: el.textContent.substring(0,100000)});
+
+                    // DOM-based extraction (new AliExpress React structure, no runParams)
+                    var h1el = document.querySelector('h1');
+                    result.title = h1el ? h1el.textContent.trim() : '';
+
+                    // Price + images + descUrl from script tags
+                    var scripts = document.querySelectorAll('script');
+                    for (var si=0; si<scripts.length; si++) {
+                        var st = scripts[si].textContent||'';
+                        if (!result.images.length && st.indexOf('imagePathList') > -1) {
+                            var im2 = st.match(/"imagePathList"\s*:\s*(\[[^\]]+\])/);
+                            if (im2) { try { result.images = JSON.parse(im2[1]).slice(0,20); } catch(e2){} }
+                        }
+                        if (result.price==='0') {
+                            var pm2 = st.match(/"price"\s*:\s*"([\d.]+)"/) || st.match(/"salePrice"\s*:\s*"([\d.]+)"/);
+                            if (pm2) result.price = pm2[1];
+                        }
+                        if (!result.descUrl) {
+                            var du = st.match(/"descriptionUrl"\s*:\s*"([^"]+)"/);
+                            if (du) result.descUrl = du[1];
+                        }
+                        if (result.images.length && result.price!=='0' && result.descUrl) break;
+                    }
+
+                    // Variants from DOM — group sku-item spans by their preceding label
+                    if (!result.variants.length) {
+                        var groups = {};
+                        var groupOrder = [];
+                        var allEls = document.querySelectorAll('[class*="sku"] span, [class*="sku"] div');
+                        var curGroup = null;
+                        for (var vi=0; vi<allEls.length; vi++) {
+                            var txt = allEls[vi].textContent.trim();
+                            if (!txt || txt.length > 60) continue;
+                            // Labels end with colon or contain colon + value
+                            var labelMatch = txt.match(/^(.+?)[：:： ]\s*(.*)$/);
+                            if (labelMatch && labelMatch[1].length < 30) {
+                                curGroup = labelMatch[1].trim();
+                                if (!groups[curGroup]) { groups[curGroup]=[]; groupOrder.push(curGroup); }
+                                if (labelMatch[2]) groups[curGroup].push(labelMatch[2].trim());
+                            } else if (curGroup && txt && txt !== curGroup) {
+                                if (groups[curGroup].indexOf(txt)===-1) groups[curGroup].push(txt);
+                            }
+                        }
+                        // Also try data-sku-col attribute grouping
+                        if (!groupOrder.length) {
+                            var skuEls = document.querySelectorAll('[data-sku-col]');
+                            var colGroups = {}, colOrder = [];
+                            for (var ci=0; ci<skuEls.length; ci++) {
+                                var col = skuEls[ci].getAttribute('data-sku-col');
+                                var label = skuEls[ci].getAttribute('title') || skuEls[ci].textContent.trim();
+                                if (!label) continue;
+                                if (!colGroups[col]) { colGroups[col]=[]; colOrder.push(col); }
+                                colGroups[col].push(label);
+                            }
+                            colOrder.forEach(function(col){
+                                if (colGroups[col].length) result.variants.push({n:'Option '+col, v:colGroups[col]});
+                            });
+                        } else {
+                            groupOrder.forEach(function(g){
+                                if (groups[g].length) result.variants.push({n:g, v:groups[g]});
+                            });
+                        }
+                    }
+
+                    if (result.title) return JSON.stringify(result);
                     return null;
                 } catch(e) { return null; }
             })();
@@ -410,7 +475,9 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
 
     price = "0"
     for pat in [r'"formatedActivityPrice"\s*:\s*"([^"]+)"',
-                r'"formatedPrice"\s*:\s*"([^"]+)"']:
+                r'"formatedPrice"\s*:\s*"([^"]+)"',
+                r'"salePrice"\s*:\s*"([\d.]+)"',
+                r'"price"\s*:\s*"([\d.]+)"']:
         p = re.search(pat, html)
         if p:
             price = re.sub(r"[^\d.]", "", p.group(1)) or "0"
