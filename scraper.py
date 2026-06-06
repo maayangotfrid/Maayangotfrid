@@ -68,6 +68,34 @@ def scrape_product(url: str) -> dict:
     return _scrape_with_selenium(url)
 
 
+_JS_INJECT_INTERCEPTOR = """
+(function() {
+    if (window.__ae_desc_urls) return;
+    window.__ae_desc_urls = [];
+    function _capture(url) {
+        if (!url || typeof url !== 'string') return;
+        var u = url.toLowerCase();
+        if (u.indexOf('aeproductsourcesite') > -1 || u.indexOf('desc.htm') > -1
+                || (u.indexOf('alicdn') > -1 && u.indexOf('desc') > -1)) {
+            window.__ae_desc_urls.push(url);
+        }
+    }
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        _capture(url);
+        return origOpen.apply(this, arguments);
+    };
+    var origFetch = window.fetch;
+    if (origFetch) {
+        window.fetch = function(input, opts) {
+            _capture(typeof input === 'string' ? input : (input && input.url) || '');
+            return origFetch.apply(this, arguments);
+        };
+    }
+})();
+"""
+
+
 def _scrape_with_selenium(url: str) -> dict:
     try:
         with SB(uc=True, headless=True, locale_code="en") as sb:
@@ -78,11 +106,14 @@ def _scrape_with_selenium(url: str) -> dict:
             except Exception:
                 pass
 
+            # Inject XHR/fetch interceptor before scrolling so we capture the
+            # description URL when it's lazily requested
+            sb.execute_script(_JS_INJECT_INTERCEPTOR)
+
             sb.execute_script("window.scrollTo(0, 800)")
             sb.sleep(1)
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
-            # Scroll past 80% to trigger description lazy-load XHR
             sb.execute_script("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.8))")
             sb.sleep(3)
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
@@ -110,7 +141,14 @@ _JS_EXTRACTION = """
     try {
         var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
 
-        // ── 0. Check _dida_config_ for description URL ────────────────────
+        // ── 0. XHR/fetch interceptor capture (injected before scroll) ────────
+        try {
+            if (window.__ae_desc_urls && window.__ae_desc_urls.length > 0) {
+                result.descUrl = window.__ae_desc_urls[0];
+            }
+        } catch(eI) {}
+
+        // ── 0b. Check _dida_config_ for description URL ───────────────────
         try {
             var dc = window._dida_config_ || {};
             var dcDesc = (dc.descUrl || dc.descriptionUrl || '');
