@@ -417,19 +417,7 @@ _JS_EXTRACTION = """
             }
         }
 
-        // Description: scan script tags for embedded JSON description
-        if (!result.desc) {
-            for (var si3 = 0; si3 < scripts.length; si3++) {
-                var st3 = scripts[si3].textContent || '';
-                if (st3.indexOf('"description"') > -1 && st3.length > 500) {
-                    var dm3 = st3.match(/"description"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-                    if (dm3 && dm3[1].length > 100) {
-                        result.desc = dm3[1].replace(/\\n/g,'').replace(/\\"/g,'"');
-                        break;
-                    }
-                }
-            }
-        }
+        // (Description from script tags is handled Python-side via full HTML scan)
 
         // Debug: count performance resource entries (lightweight)
         try { result.perfCount = performance.getEntriesByType('resource').length; } catch(eP2) { result.perfCount = -1; }
