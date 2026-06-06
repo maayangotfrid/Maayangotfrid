@@ -140,6 +140,9 @@ def _scrape_with_selenium(url: str) -> dict:
             except Exception:
                 pass
 
+            # Proper viewport so Intersection Observer fires in headless mode
+            sb.set_window_size(1920, 1080)
+
             # Inject XHR/fetch interceptor before scrolling so we capture the
             # description URL when it's lazily requested
             sb.execute_script(_JS_INJECT_INTERCEPTOR)
@@ -148,7 +151,20 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.sleep(1)
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
-            sb.execute_script("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.8))")
+            # Try scrollIntoView on description-related elements
+            sb.execute_script("""
+                (function() {
+                    var sel = [
+                        '[class*="description"]', '[class*="detail-desc"]',
+                        '[id*="description"]', '[class*="product-desc"]',
+                        '[class*="pdp-comp-product-description"]'
+                    ];
+                    for (var i = 0; i < sel.length; i++) {
+                        var el = document.querySelector(sel[i]);
+                        if (el) { el.scrollIntoView({behavior:'instant',block:'center'}); break; }
+                    }
+                })();
+            """)
             sb.sleep(3)
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
@@ -323,28 +339,46 @@ _JS_EXTRACTION = """
                 }
             }
         }
-        // Description: look for iframe in description-related containers
-        if (!result.descUrl) {
-            var descDivs = document.querySelectorAll(
-                '[class*="description"] iframe, [class*="detail-desc"] iframe, [id*="desc"] iframe'
-            );
-            if (descDivs.length) {
-                var ds = descDivs[0].src || descDivs[0].getAttribute('data-src') || '';
-                if (ds) result.descUrl = ds;
-            }
-        }
-        // Description: try inline DOM content (new AliExpress renders desc inline)
+        // Description: broader inline DOM scan
         if (!result.desc) {
-            var descContainers = document.querySelectorAll(
-                '[class*="desc-content"], [class*="description-content"], ' +
-                '[class*="product-description"], [class*="detail-desc-content"], ' +
-                '[class*="pdp-comp-product-description"], [id*="product-description"]'
-            );
-            for (var dci = 0; dci < descContainers.length; dci++) {
-                var dcHtml = descContainers[dci].innerHTML || '';
-                if (dcHtml.length > 200) { result.desc = dcHtml.substring(0, 60000); break; }
+            var descSelectors = [
+                '[class*="desc-content"]', '[class*="description-content"]',
+                '[class*="product-description"]', '[class*="detail-desc-content"]',
+                '[class*="pdp-comp-product-description"]', '[id*="product-description"]',
+                '[class*="description"]', '[class*="detail-desc"]',
+                '[class*="product-detail"]', '[class*="item-description"]'
+            ];
+            for (var dsi = 0; dsi < descSelectors.length; dsi++) {
+                var descEls = document.querySelectorAll(descSelectors[dsi]);
+                for (var dei = 0; dei < descEls.length; dei++) {
+                    var deHtml = descEls[dei].innerHTML || '';
+                    if (deHtml.length > 300) { result.desc = deHtml.substring(0, 60000); break; }
+                }
+                if (result.desc) break;
             }
         }
+
+        // Description: scan script tags for embedded JSON description
+        if (!result.desc) {
+            for (var si3 = 0; si3 < scripts.length; si3++) {
+                var st3 = scripts[si3].textContent || '';
+                if (st3.indexOf('"description"') > -1 && st3.length > 500) {
+                    var dm3 = st3.match(/"description"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                    if (dm3 && dm3[1].length > 100) {
+                        result.desc = dm3[1].replace(/\\n/g,'').replace(/\\"/g,'"');
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Debug: capture all performance resource URLs
+        try {
+            var perfAll = performance.getEntriesByType('resource');
+            result.perfUrls = perfAll.map(function(e){return e.name;}).filter(function(n){
+                return n && (n.indexOf('alicdn') > -1 || n.indexOf('aliexpress') > -1 || n.indexOf('desc') > -1);
+            }).slice(0, 30);
+        } catch(eP2) { result.perfUrls = []; }
 
         // Variants: parse span texts using "NAME: VALUE" label pattern
         // This is the most reliable approach for new AliExpress React pages
@@ -420,9 +454,10 @@ def _try_js_extraction(sb, url: str) -> dict | None:
             "title": title,
             "description": description,
             "price": price,
-            "_desc_url": desc_url,  # debug
-            "_all_iframes": data.get("iframesFound", []),  # debug
-            "_captured_iframes": data.get("allIframes", []),  # debug
+            "_desc_url": desc_url,
+            "_all_iframes": data.get("iframesFound", []),
+            "_captured_iframes": data.get("allIframes", []),
+            "_perf_urls": data.get("perfUrls", []),
             "images": [i for i in images if i][:20],
             "variants": variants,
             "source_url": url,
