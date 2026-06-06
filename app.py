@@ -292,26 +292,58 @@ def debug_keys():
             r = sb.execute_script("""
                 (function() {
                     try {
-                        var rp=window.runParams||{},d=rp.data||{};
-                        var c=d.pageComponent||d.productComponent||d.itemInfoComponent||rp.pageComponent||rp.productComponent||{};
-                        var sm=c.skuModule||c.skuComponent||d.skuModule||d.skuComponent||{};
-                        var sl=sm.productSKUPropertyList||sm.skuPropertyList||[];
-                        var pm=c.priceModule||c.priceComponent||d.priceModule||{};
-                        var im=c.imageModule||c.imageComponent||d.imageModule||{};
-                        var dm=c.descriptionModule||c.descriptionComponent||d.descriptionModule||{};
-                        return JSON.stringify({
-                            rpKeys:Object.keys(rp),
-                            dKeys:Object.keys(d).slice(0,30),
-                            cKeys:Object.keys(c).slice(0,30),
-                            smKeys:Object.keys(sm),
-                            skuLen:sl.length,
-                            firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,500):'empty',
-                            title:(c.titleModule||c.titleComponent||{}).subject||d.subject||c.subject||'',
-                            price:pm.formatedActivityPrice||pm.formatedPrice||pm.minActivityAmount||pm.minAmount||'',
-                            imgLen:(im.imagePathList||[]).length,
-                            descUrl:dm.descriptionUrl||'',
-                            hasDesc:!!(dm.description)
-                        });
+                        var out = {};
+
+                        // Check window.runParams
+                        var rp = window.runParams || {};
+                        out.rpKeys = Object.keys(rp).slice(0,20);
+
+                        // Check __NEXT_DATA__
+                        var nd = document.getElementById('__NEXT_DATA__');
+                        out.hasNextData = !!nd;
+                        if (nd) {
+                            try {
+                                var ndParsed = JSON.parse(nd.textContent);
+                                out.ndKeys = Object.keys(ndParsed).slice(0,10);
+                                var pp = (ndParsed.props||{}).pageProps||{};
+                                out.ppKeys = Object.keys(pp).slice(0,20);
+                                var id2 = pp.initialData||pp.data||{};
+                                out.idKeys = Object.keys(id2).slice(0,20);
+                            } catch(e2){ out.ndParseErr = e2.message; }
+                        }
+
+                        // Scan all script tags for known AE keys
+                        var scripts = document.querySelectorAll('script');
+                        var foundTitle = '', foundPrice = '', foundImgLen = 0, foundSkuLen = 0;
+                        for (var i=0; i<scripts.length; i++) {
+                            var t = scripts[i].textContent||'';
+                            if (!foundTitle && t.indexOf('titleModule') > -1) {
+                                var tm = t.match(/"subject":"([^"]{5,200})"/);
+                                if (tm) foundTitle = tm[1];
+                            }
+                            if (!foundPrice && t.indexOf('formatedPrice') > -1) {
+                                var pm2 = t.match(/"formatedPrice":"([^"]+)"/);
+                                if (pm2) foundPrice = pm2[1];
+                            }
+                            if (!foundImgLen && t.indexOf('imagePathList') > -1) {
+                                var im2 = t.match(/"imagePathList":\[([^\]]+)\]/);
+                                if (im2) foundImgLen = (im2[1].match(/https/g)||[]).length;
+                            }
+                            if (!foundSkuLen && t.indexOf('productSKUPropertyList') > -1) {
+                                foundSkuLen = (t.match(/"skuPropertyName"/g)||[]).length;
+                            }
+                        }
+                        out.scriptTitle = foundTitle;
+                        out.scriptPrice = foundPrice;
+                        out.scriptImgLen = foundImgLen;
+                        out.scriptSkuLen = foundSkuLen;
+
+                        // Check page title and meta
+                        out.pageTitle = document.title;
+                        var metaDesc = document.querySelector('meta[name="description"]');
+                        out.metaDesc = metaDesc ? metaDesc.content.substring(0,100) : '';
+
+                        return JSON.stringify(out);
                     } catch(e){return JSON.stringify({jsError:e.message});}
                 })()
             """)
