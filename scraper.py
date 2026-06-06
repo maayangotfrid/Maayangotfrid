@@ -22,11 +22,6 @@ def _normalize_url(url: str) -> str:
 
 
 def _clean_img(url) -> str:
-    """
-    Normalise an AliExpress / alicdn image URL:
-    - protocol-relative "//cdn…" → add "https:"
-    - strip size/quality suffixes like _640x640.jpg, _Q90.jpg
-    """
     if not url:
         return ""
     if isinstance(url, dict):
@@ -38,15 +33,13 @@ def _clean_img(url) -> str:
         url = "https:" + url
     elif not url.startswith("http"):
         url = "https://" + url
-    # Remove size suffixes like _640x640.jpg or _640x640Q90.jpg
     url = re.sub(r'_(\d+x\d+)[^/]*\.(jpe?g|png|webp)', r'.\2', url, flags=re.I)
-    # Remove quality-only suffixes like _Q90.jpg
     url = re.sub(r'_Q\d+\.(jpe?g|png|webp)', r'.\1', url, flags=re.I)
     return url
 
 
 def _fetch_description(desc_url: str) -> str:
-    """Fetch description HTML from AliExpress, fixing relative image URLs."""
+    """Fetch description HTML, fixing protocol-relative image URLs."""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -56,9 +49,7 @@ def _fetch_description(desc_url: str) -> str:
         if not r.ok:
             return ""
         html = r.text
-        # Fix protocol-relative image src: //cdn... → https://cdn...
         html = re.sub(r'src=["\']\/\/', 'src="https://', html)
-        # Remove script tags from description HTML
         html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.I)
         return html
     except Exception:
@@ -83,18 +74,17 @@ def _scrape_with_selenium(url: str) -> dict:
             except Exception:
                 pass
 
-            # Scroll to trigger lazy-loading
             sb.execute_script("window.scrollTo(0, 800)")
             sb.sleep(1)
+            sb.execute_script("window.scrollTo(0, 1500)")
+            sb.sleep(1)
 
-            # Method 1: extract MINIMAL fields in JS (avoids WebDriver truncation of huge objects)
             result = _try_js_extraction(sb, url)
             if result and result.get("title"):
                 return result
 
             html = sb.get_page_source()
 
-        # Methods 2-4 operate on raw HTML
         result = (
             _try_data_from_script(html, url)
             or _try_next_data(html, url)
@@ -106,165 +96,163 @@ def _scrape_with_selenium(url: str) -> dict:
         return {"status": "error", "message": str(e), "source_url": url}
 
 
+_JS_EXTRACTION = """
+(function() {
+    try {
+        var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
+
+        // ── 1. window.runParams (classic AliExpress) ──────────────────────
+        var rp = window.runParams || {};
+        var rpd = rp.data || {};
+        var c = rpd.pageComponent || rpd.productComponent || rpd.itemInfoComponent
+             || rp.pageComponent || rp.productComponent || {};
+
+        result.title = (c.titleModule||{}).subject || (c.titleComponent||{}).subject
+                    || rpd.subject || c.subject || '';
+
+        var pm = c.priceModule || c.priceComponent || rpd.priceModule || {};
+        result.price = pm.formatedActivityPrice || pm.formatedPrice
+                    || pm.minActivityAmount || pm.minAmount || '0';
+
+        var im = c.imageModule || c.imageComponent || rpd.imageModule || {};
+        result.images = (im.imagePathList || []).slice(0, 20);
+
+        var sm = c.skuModule || c.skuComponent || rpd.skuModule || rpd.skuComponent || {};
+        var skuList = sm.productSKUPropertyList || sm.skuPropertyList || sm.properties || [];
+        if (!skuList.length) {
+            var found = null;
+            function dig(obj, depth) {
+                if (!obj || depth > 4 || typeof obj !== 'object') return;
+                if (Array.isArray(obj.productSKUPropertyList) && obj.productSKUPropertyList.length) {
+                    found = obj.productSKUPropertyList; return;
+                }
+                for (var k in obj) { if (!found) dig(obj[k], depth + 1); }
+            }
+            dig(rp, 0);
+            if (found) skuList = found;
+        }
+        result.variants = skuList.map(function(p) {
+            var vals = p.skuPropertyValues || p.values || p.propertyValues || [];
+            return {
+                n: p.skuPropertyName || p.name || p.propertyName || 'Option',
+                v: vals.map(function(v) {
+                    return v.propertyValueDisplayName || v.displayName || v.propertyValueName || v.name || '';
+                }).filter(Boolean)
+            };
+        }).filter(function(x) { return x.v.length > 0; });
+
+        var dm = c.descriptionModule || c.descriptionComponent || rpd.descriptionModule || {};
+        result.descUrl = dm.descriptionUrl || '';
+        result.desc = dm.description || '';
+
+        if (result.title) return JSON.stringify(result);
+
+        // ── 2. __NEXT_DATA__ ──────────────────────────────────────────────
+        var nd = document.getElementById('__NEXT_DATA__');
+        if (nd) return JSON.stringify({_nd: nd.textContent.substring(0, 100000)});
+
+        // ── 3. DOM-based extraction (new AliExpress React pages) ──────────
+        var h1el = document.querySelector('h1');
+        result.title = h1el ? h1el.textContent.trim() : '';
+
+        // Price + images + descUrl from inline script tags
+        var scripts = document.querySelectorAll('script');
+        for (var si = 0; si < scripts.length; si++) {
+            var st = scripts[si].textContent || '';
+            if (!result.images.length && st.indexOf('imagePathList') > -1) {
+                var im2 = st.match(/"imagePathList"\\s*:\\s*(\\[[^\\]]+\\])/);
+                if (im2) { try { result.images = JSON.parse(im2[1]).slice(0, 20); } catch(e2) {} }
+            }
+            if (result.price === '0') {
+                var pm2 = st.match(/"price"\\s*:\\s*"([\\d.]+)"/)
+                       || st.match(/"salePrice"\\s*:\\s*"([\\d.]+)"/);
+                if (pm2) result.price = pm2[1];
+            }
+            if (!result.descUrl) {
+                var du = st.match(/"descriptionUrl"\\s*:\\s*"([^"]+)"/);
+                if (du) result.descUrl = du[1].replace(/\\\\\\//g, '/');
+            }
+            if (result.images.length && result.price !== '0' && result.descUrl) break;
+        }
+
+        // Description URL via lazy iframe
+        if (!result.descUrl) {
+            var frames = document.querySelectorAll('iframe');
+            for (var fi = 0; fi < frames.length; fi++) {
+                var fsrc = frames[fi].src || frames[fi].getAttribute('data-src') || '';
+                if (fsrc && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1)) {
+                    result.descUrl = fsrc; break;
+                }
+            }
+        }
+        // Description URL via AliExpress API pattern
+        if (!result.descUrl) {
+            var iM = window.location.href.match(/\\/item\\/(\\d+)/);
+            if (iM) result.descUrl = 'https://ae-goods.aliexpress.com/pc/detail/description/' + iM[1] + '.html';
+        }
+
+        // Variants from DOM property rows
+        if (!result.variants.length) {
+            var propRows = document.querySelectorAll(
+                '[class*="sku-item--property"], [class*="skuProperty--"], [class*="product-sku--property"]'
+            );
+            for (var ri = 0; ri < propRows.length; ri++) {
+                var nameEl = propRows[ri].querySelector(
+                    '[class*="sku-item--title"], [class*="title--"], [class*="property-title"]'
+                );
+                var rname = nameEl
+                    ? nameEl.textContent.replace(/[:\\uff1a]\\s*.*/g, '').trim()
+                    : ('Option ' + (ri + 1));
+                var valEls = propRows[ri].querySelectorAll(
+                    '[class*="sku-item--sku"], [class*="skuPropertyItem"], [data-sku-col]'
+                );
+                var vals = [];
+                for (var vei = 0; vei < valEls.length; vei++) {
+                    var v = (valEls[vei].getAttribute('title') || valEls[vei].textContent)
+                                .trim().replace(/[:\\uff1a]\\s*.*/g, '').trim();
+                    if (v && v.length < 50 && vals.indexOf(v) === -1) vals.push(v);
+                }
+                if (vals.length) result.variants.push({n: rname, v: vals});
+            }
+
+            // Fallback: group [data-sku-col] elements by column index
+            if (!result.variants.length) {
+                var skuEls = document.querySelectorAll('[data-sku-col]');
+                var colMap = {}, colOrder = [];
+                for (var ci = 0; ci < skuEls.length; ci++) {
+                    var col = skuEls[ci].getAttribute('data-sku-col');
+                    var lbl = (skuEls[ci].getAttribute('title') || skuEls[ci].textContent)
+                                  .trim().replace(/[:\\uff1a]\\s*.*/g, '').trim();
+                    if (!lbl || lbl.length > 50) continue;
+                    if (!colMap[col]) { colMap[col] = []; colOrder.push(col); }
+                    if (colMap[col].indexOf(lbl) === -1) colMap[col].push(lbl);
+                }
+                for (var coi = 0; coi < colOrder.length; coi++) {
+                    var c2 = colOrder[coi];
+                    if (colMap[c2].length) result.variants.push({n: 'Option ' + (parseInt(c2) + 1), v: colMap[c2]});
+                }
+            }
+        }
+
+        if (result.title) return JSON.stringify(result);
+        return null;
+    } catch(e) { return null; }
+})();
+"""
+
+
 def _try_js_extraction(sb, url: str) -> dict | None:
-    """
-    Extract ONLY the needed fields in JavaScript before returning to Python,
-    so we never serialise the full runParams object (several MB → silently
-    truncated by WebDriver).
-
-    Returns a normalised product dict, or None on failure.
-    """
     try:
-        raw = sb.execute_script("""
-            (function() {
-                try {
-                    var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
-                    var rp = window.runParams || {};
-                    var data = rp.data || {};
-
-                    // Try all known component paths
-                    var c = data.pageComponent
-                         || data.productComponent
-                         || data.itemInfoComponent
-                         || rp.pageComponent
-                         || rp.productComponent
-                         || {};
-
-                    // Title
-                    result.title = (c.titleModule||{}).subject
-                                 || (c.titleComponent||{}).subject
-                                 || data.subject || c.subject || '';
-
-                    // Price
-                    var pm = c.priceModule || c.priceComponent || data.priceModule || {};
-                    result.price = pm.formatedActivityPrice || pm.formatedPrice
-                                 || pm.minActivityAmount || pm.minAmount || '0';
-
-                    // Images
-                    var im = c.imageModule || c.imageComponent || data.imageModule || {};
-                    result.images = (im.imagePathList || []).slice(0,20);
-
-                    // Variants — search at component level AND data level
-                    var sm = c.skuModule || c.skuComponent
-                          || data.skuModule || data.skuComponent || {};
-                    var skuList = sm.productSKUPropertyList || sm.skuPropertyList || sm.properties || [];
-
-                    // If still empty, deep-search runParams for productSKUPropertyList
-                    if (!skuList.length) {
-                        var found = null;
-                        function dig(obj, depth) {
-                            if (!obj || depth > 4 || typeof obj !== 'object') return;
-                            if (Array.isArray(obj.productSKUPropertyList) && obj.productSKUPropertyList.length) {
-                                found = obj.productSKUPropertyList; return;
-                            }
-                            for (var k in obj) { if (!found) dig(obj[k], depth+1); }
-                        }
-                        dig(rp, 0);
-                        if (found) skuList = found;
-                    }
-
-                    result.variants = skuList.map(function(p){
-                        var vals = p.skuPropertyValues || p.values || p.propertyValues || [];
-                        return {
-                            n: p.skuPropertyName || p.name || p.propertyName || 'Option',
-                            v: vals.map(function(v){
-                                return v.propertyValueDisplayName || v.displayName
-                                    || v.propertyValueName || v.name || '';
-                            }).filter(Boolean)
-                        };
-                    }).filter(function(x){ return x.v.length > 0; });
-
-                    // Description — search multiple paths
-                    var dm = c.descriptionModule || c.descriptionComponent
-                          || data.descriptionModule || {};
-                    result.descUrl = dm.descriptionUrl || '';
-                    result.desc = dm.description || '';
-
-                    if (result.title) return JSON.stringify(result);
-
-                    // Fallback: __NEXT_DATA__
-                    var el = document.getElementById('__NEXT_DATA__');
-                    if (el) return JSON.stringify({_nd: el.textContent.substring(0,100000)});
-
-                    // DOM-based extraction (new AliExpress React structure, no runParams)
-                    var h1el = document.querySelector('h1');
-                    result.title = h1el ? h1el.textContent.trim() : '';
-
-                    // Price + images + descUrl from script tags
-                    var scripts = document.querySelectorAll('script');
-                    for (var si=0; si<scripts.length; si++) {
-                        var st = scripts[si].textContent||'';
-                        if (!result.images.length && st.indexOf('imagePathList') > -1) {
-                            var im2 = st.match(/"imagePathList"\s*:\s*(\[[^\]]+\])/);
-                            if (im2) { try { result.images = JSON.parse(im2[1]).slice(0,20); } catch(e2){} }
-                        }
-                        if (result.price==='0') {
-                            var pm2 = st.match(/"price"\s*:\s*"([\d.]+)"/) || st.match(/"salePrice"\s*:\s*"([\d.]+)"/);
-                            if (pm2) result.price = pm2[1];
-                        }
-                        if (!result.descUrl) {
-                            var du = st.match(/"descriptionUrl"\s*:\s*"([^"]+)"/);
-                            if (du) result.descUrl = du[1];
-                        }
-                        if (result.images.length && result.price!=='0' && result.descUrl) break;
-                    }
-
-                    // Variants from DOM — group sku-item spans by their preceding label
-                    if (!result.variants.length) {
-                        var groups = {};
-                        var groupOrder = [];
-                        var allEls = document.querySelectorAll('[class*="sku"] span, [class*="sku"] div');
-                        var curGroup = null;
-                        for (var vi=0; vi<allEls.length; vi++) {
-                            var txt = allEls[vi].textContent.trim();
-                            if (!txt || txt.length > 60) continue;
-                            // Labels end with colon or contain colon + value
-                            var labelMatch = txt.match(/^(.+?)[：:： ]\s*(.*)$/);
-                            if (labelMatch && labelMatch[1].length < 30) {
-                                curGroup = labelMatch[1].trim();
-                                if (!groups[curGroup]) { groups[curGroup]=[]; groupOrder.push(curGroup); }
-                                if (labelMatch[2]) groups[curGroup].push(labelMatch[2].trim());
-                            } else if (curGroup && txt && txt !== curGroup) {
-                                if (groups[curGroup].indexOf(txt)===-1) groups[curGroup].push(txt);
-                            }
-                        }
-                        // Also try data-sku-col attribute grouping
-                        if (!groupOrder.length) {
-                            var skuEls = document.querySelectorAll('[data-sku-col]');
-                            var colGroups = {}, colOrder = [];
-                            for (var ci=0; ci<skuEls.length; ci++) {
-                                var col = skuEls[ci].getAttribute('data-sku-col');
-                                var label = skuEls[ci].getAttribute('title') || skuEls[ci].textContent.trim();
-                                if (!label) continue;
-                                if (!colGroups[col]) { colGroups[col]=[]; colOrder.push(col); }
-                                colGroups[col].push(label);
-                            }
-                            colOrder.forEach(function(col){
-                                if (colGroups[col].length) result.variants.push({n:'Option '+col, v:colGroups[col]});
-                            });
-                        } else {
-                            groupOrder.forEach(function(g){
-                                if (groups[g].length) result.variants.push({n:g, v:groups[g]});
-                            });
-                        }
-                    }
-
-                    if (result.title) return JSON.stringify(result);
-                    return null;
-                } catch(e) { return null; }
-            })();
-        """)
+        raw = sb.execute_script(_JS_EXTRACTION)
 
         if not raw:
             return None
 
         data = json.loads(raw)
 
-        # Got __NEXT_DATA__ fallback from JS
         if "_nd" in data:
             return _parse_next_raw(data["_nd"], url)
 
-        # Got minimal runParams fields directly
         title = data.get("title", "")
         if not title:
             return None
@@ -302,10 +290,6 @@ def _try_js_extraction(sb, url: str) -> dict | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Helpers shared by multiple fallback methods
-# ---------------------------------------------------------------------------
-
 def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
     title = comp.get("titleModule", {}).get("subject", "")
     if not title:
@@ -319,7 +303,6 @@ def _parse_runparams_comp(comp: dict, url: str) -> dict | None:
     images = [_clean_img(i) for i in
               comp.get("imageModule", {}).get("imagePathList", [])]
 
-    # Include variant colour swatch images
     for prop in comp.get("skuModule", {}).get("productSKUPropertyList", []):
         for val in prop.get("skuPropertyValues", []):
             img = val.get("skuPropertyImagePath", "")
@@ -419,10 +402,6 @@ def _parse_next_raw(raw_text: str, url: str) -> dict | None:
     }
 
 
-# ---------------------------------------------------------------------------
-# Fallback method 2: parse window.runParams from raw HTML source
-# ---------------------------------------------------------------------------
-
 def _try_data_from_script(html: str, url: str) -> dict | None:
     patterns = [
         r'window\.runParams\s*=\s*(\{.+?\});\s*(?:window|var )',
@@ -447,10 +426,6 @@ def _try_data_from_script(html: str, url: str) -> dict | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Fallback method 3: __NEXT_DATA__ script tag in HTML
-# ---------------------------------------------------------------------------
-
 def _try_next_data(html: str, url: str) -> dict | None:
     m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.+?)</script>',
                   html, re.DOTALL)
@@ -458,10 +433,6 @@ def _try_next_data(html: str, url: str) -> dict | None:
         return None
     return _parse_next_raw(m.group(1), url)
 
-
-# ---------------------------------------------------------------------------
-# Fallback method 4: regex extraction of individual fields
-# ---------------------------------------------------------------------------
 
 def _try_regex_extraction(html: str, url: str) -> dict | None:
     title = ""
@@ -508,7 +479,7 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
     description = ""
     desc_m = re.search(r'"descriptionUrl"\s*:\s*"([^"]+)"', html)
     if desc_m:
-        description = _fetch_description(desc_m.group(1))
+        description = _fetch_description(desc_m.group(1).replace('\/', '/'))
 
     return {
         "title": title,
@@ -521,25 +492,19 @@ def _try_regex_extraction(html: str, url: str) -> dict | None:
     }
 
 
-# ---------------------------------------------------------------------------
-# Fallback method 5: plain BeautifulSoup HTML parsing
-# ---------------------------------------------------------------------------
-
 def _try_html_fallback(html: str, url: str) -> dict:
     soup = BeautifulSoup(html, "html5lib")
     title_tag = soup.find("h1")
     title = title_tag.get_text(strip=True) if title_tag else "Unknown Product"
 
     price = "0"
-    for cls in [re.compile(r"product-price", re.I), re.compile(r"price", re.I)]:
-        tag = soup.find(class_=cls)
-        if tag:
-            m = re.search(r"[\d.]+", tag.get_text())
-            if m:
-                price = m.group()
-                break
+    for pat in [r'"price"\s*:\s*"([\d.]+)"', r'"salePrice"\s*:\s*"([\d.]+)"',
+                r'"formatedPrice"\s*:\s*"([^"]+)"']:
+        pm = re.search(pat, html)
+        if pm:
+            price = re.sub(r"[^\d.]", "", pm.group(1)) or "0"
+            break
 
-    # Try imagePathList inside any script tag first
     images = []
     for script in soup.find_all("script"):
         text = script.string or ""
@@ -553,7 +518,6 @@ def _try_html_fallback(html: str, url: str) -> dict:
             except Exception:
                 pass
 
-    # Fallback: large alicdn <img> tags
     if not images:
         seen = set()
         for img in soup.find_all("img"):
@@ -579,10 +543,6 @@ def _try_html_fallback(html: str, url: str) -> dict:
         "status": "ok",
     }
 
-
-# ---------------------------------------------------------------------------
-# Product search
-# ---------------------------------------------------------------------------
 
 def search_products(keyword: str, page: int = 1) -> list[dict]:
     if not SELENIUM_AVAILABLE:
