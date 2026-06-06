@@ -209,19 +209,24 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
 
-            result = _try_js_extraction(sb, url)
+            diag = {}
+            result = _try_js_extraction(sb, url, diag)
 
             # Scan live rendered HTML in Python (catches what JS missed)
             html_live = sb.get_page_source()
+            diag["live_html_len"] = len(html_live)
+
             if result and result.get("title") and not result.get("description"):
                 desc, found_url = _extract_desc_from_html(html_live)
                 if desc:
                     result["description"] = desc
                 if found_url:
                     result["_desc_url"] = found_url
-                result["_live_html_len"] = len(html_live)
 
             if result and result.get("title"):
+                result["_path"] = "js"
+                result["_diag"] = diag
+                result["_live_html_len"] = len(html_live)
                 return result
 
             html = html_live
@@ -232,6 +237,9 @@ def _scrape_with_selenium(url: str) -> dict:
             or _try_regex_extraction(html, url)
             or _try_html_fallback(html, url)
         )
+        if isinstance(result, dict):
+            result["_path"] = "fallback"
+            result["_diag"] = diag
         return result
     except Exception as e:
         return {"status": "error", "message": str(e), "source_url": url}
@@ -463,21 +471,31 @@ _JS_EXTRACTION = """
 """
 
 
-def _try_js_extraction(sb, url: str) -> dict | None:
+def _try_js_extraction(sb, url: str, diag: dict | None = None) -> dict | None:
+    if diag is None:
+        diag = {}
     try:
         raw = sb.execute_script(_JS_EXTRACTION)
 
+        diag["raw_type"] = type(raw).__name__
+        diag["raw_len"] = len(raw) if isinstance(raw, str) else 0
+        diag["raw_head"] = (raw[:200] if isinstance(raw, str) else str(raw))
+
         if not raw:
+            diag["js_path"] = "raw_empty"
             return None
 
         data = json.loads(raw)
 
         if "_nd" in data:
+            diag["js_path"] = "next_data"
             return _parse_next_raw(data["_nd"], url)
 
         title = data.get("title", "")
         if not title:
+            diag["js_path"] = "no_title"
             return None
+        diag["js_path"] = "ok"
 
         price_str = data.get("price", "0")
         price = re.sub(r"[^\d.]", "", price_str) or "0"
@@ -528,8 +546,8 @@ def _try_js_extraction(sb, url: str) -> dict | None:
             "status": "ok",
         }
 
-    except Exception:
-        pass
+    except Exception as e:
+        diag["js_exc"] = f"{type(e).__name__}: {e}"
     return None
 
 
