@@ -106,6 +106,14 @@ _JS_EXTRACTION = """
     try {
         var result = {title:'',price:'0',images:[],variants:[],descUrl:'',desc:''};
 
+        // ── 0. Check _dida_config_ for description URL ────────────────────
+        try {
+            var dc = window._dida_config_ || {};
+            var dcDesc = (dc.descUrl || dc.descriptionUrl || '');
+            if (!dcDesc && dc.pageConfig) dcDesc = dc.pageConfig.descUrl || dc.pageConfig.descriptionUrl || '';
+            if (dcDesc) result.descUrl = dcDesc.replace(/\\\//g, '/');
+        } catch(e0) {}
+
         // ── 1. window.runParams (classic AliExpress) ──────────────────────
         var rp = window.runParams || {};
         var rpd = rp.data || {};
@@ -181,9 +189,21 @@ _JS_EXTRACTION = """
                     var duQ1 = duAfter.indexOf('"');
                     if (duQ1 > -1) {
                         var duRaw = duAfter.substring(duQ1 + 1, duAfter.indexOf('"', duQ1 + 1));
-                        // Remove JSON-escaped slashes (\/)
                         result.descUrl = duRaw.replace(/\\\//g, '/');
                     }
+                }
+            }
+            // aeproductsourcesite URL (new AliExpress description endpoint)
+            if (!result.descUrl && st.indexOf('aeproductsourcesite') > -1) {
+                var aeIdx = st.indexOf('aeproductsourcesite');
+                // Find the full URL around it
+                var aeStart = aeIdx;
+                while (aeStart > 0 && st[aeStart] !== '"' && st[aeStart] !== "'") aeStart--;
+                var aeEnd = aeIdx;
+                while (aeEnd < st.length && st[aeEnd] !== '"' && st[aeEnd] !== "'" && st[aeEnd] !== ' ') aeEnd++;
+                var aeUrl = st.substring(aeStart + 1, aeEnd).replace(/\\\//g, '/');
+                if (aeUrl.indexOf('http') === 0 || aeUrl.indexOf('//') === 0) {
+                    result.descUrl = aeUrl.startsWith('//') ? 'https:' + aeUrl : aeUrl;
                 }
             }
             if (result.images.length && result.price !== '0' && result.descUrl) break;
