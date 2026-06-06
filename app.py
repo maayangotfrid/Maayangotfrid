@@ -280,49 +280,39 @@ def debug_scrape():
 
 @app.route("/api/debug-keys")
 def debug_keys():
-    """Fast debug: returns runParams structure keys only."""
-    import re as _re
-    import json as _json
     try:
         from seleniumbase import SB
-    except ImportError:
-        return jsonify({"error": "seleniumbase not installed"}), 500
-
-    raw_url = request.args.get("url", "")
-    m = _re.search(r'/item/(\d+)', raw_url)
-    url = f"https://www.aliexpress.com/item/{m.group(1)}.html" if m else raw_url
-    if not url:
-        return jsonify({"error": "url param required"}), 400
-
-    try:
+        import re, json as _j
+        url = request.args.get("url", "")
+        m = re.search(r'/item/(\d+)', url)
+        url = f"https://www.aliexpress.com/item/{m.group(1)}.html" if m else url
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(url)
             sb.sleep(6)
-            result = sb.execute_script("""
+            r = sb.execute_script("""
                 try {
-                    var rp = window.runParams || {};
-                    var data = rp.data || {};
-                    var c = data.pageComponent || data.productComponent || rp.pageComponent || {};
-                    var sm = c.skuModule || data.skuModule || {};
-                    var skuList = sm.productSKUPropertyList || [];
+                    var rp=window.runParams||{},d=rp.data||{};
+                    var c=d.pageComponent||d.productComponent||rp.pageComponent||{};
+                    var sm=c.skuModule||d.skuModule||{};
+                    var sl=sm.productSKUPropertyList||[];
                     return JSON.stringify({
-                        hasRunParams: !!window.runParams,
-                        rpTopKeys: Object.keys(rp).slice(0,15),
-                        dataKeys: Object.keys(data).slice(0,20),
-                        compKeys: Object.keys(c).slice(0,20),
-                        skuKeys: Object.keys(sm),
-                        skuCount: skuList.length,
-                        firstSkuProp: skuList[0] ? JSON.stringify(skuList[0]).substring(0,300) : 'none',
-                        title: (c.titleModule||{}).subject || '',
-                        price: (c.priceModule||{}).formatedActivityPrice || (c.priceModule||{}).formatedPrice || '',
-                        imgCount: ((c.imageModule||{}).imagePathList||[]).length,
-                        descUrl: (c.descriptionModule||{}).descriptionUrl || ''
+                        rpKeys:Object.keys(rp),
+                        dKeys:Object.keys(d).slice(0,25),
+                        cKeys:Object.keys(c).slice(0,25),
+                        smKeys:Object.keys(sm),
+                        skuLen:sl.length,
+                        firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,300):'empty',
+                        title:(c.titleModule||{}).subject||'',
+                        price:(c.priceModule||{}).formatedActivityPrice||(c.priceModule||{}).formatedPrice||'',
+                        imgLen:((c.imageModule||{}).imagePathList||[]).length,
+                        descUrl:(c.descriptionModule||{}).descriptionUrl||''
                     });
-                } catch(e) { return JSON.stringify({error: e.message}); }
+                } catch(e){return JSON.stringify({jsError:e.message});}
             """)
-            return jsonify(_json.loads(result) if result else {"error": "no result"})
+        return jsonify(_j.loads(r) if r else {"result": "null from js"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
 
 
 # ---------------------------------------------------------------------------
