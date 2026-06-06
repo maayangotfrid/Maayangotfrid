@@ -303,13 +303,29 @@ def debug_keys():
                         out.rpKeys = Object.keys(rp).slice(0,20);
                         if (rp.data) out.rpDataKeys = Object.keys(rp.data).slice(0,20);
 
-                        // 2. Other known AliExpress globals
-                        var knownGlobals = ['__g_AEM_data','__INITIAL_DATA__','PAGE_INIT_DATA',
-                            '_dida_config_','__aer_data','__page_data__','window._aElectronData',
-                            'productData','itemData','__APP_DATA__'];
+                        // 2. Check window.AES (AliExpress data store)
                         out.foundGlobals = [];
-                        for (var gi=0; gi<knownGlobals.length; gi++) {
-                            if (window[knownGlobals[gi]]) out.foundGlobals.push(knownGlobals[gi]);
+                        if (window.AES) {
+                            out.foundGlobals.push('AES');
+                            try {
+                                out.aesKeys = Object.keys(window.AES).slice(0,20);
+                                // AES often has modules
+                                if (window.AES.data) out.aesDataKeys = Object.keys(window.AES.data).slice(0,20);
+                            } catch(e3){}
+                        }
+                        if (window.Hawe) {
+                            out.foundGlobals.push('Hawe');
+                            try { out.haweKeys = Object.keys(window.Hawe).slice(0,20); } catch(e4){}
+                        }
+                        // Check other known globals
+                        var knownGlobals2 = ['__g_AEM_data','__INITIAL_DATA__','PAGE_INIT_DATA',
+                            'GEP_CONFIG','AES_CONFIG','productData','itemData'];
+                        for (var gi=0; gi<knownGlobals2.length; gi++) {
+                            if (window[knownGlobals2[gi]]) out.foundGlobals.push(knownGlobals2[gi]);
+                        }
+                        // GEP_CONFIG might have product info
+                        if (window.GEP_CONFIG) {
+                            try { out.gepKeys = Object.keys(window.GEP_CONFIG).slice(0,20); } catch(e5){}
                         }
 
                         // 3. All window keys that look like data (objects, not functions/DOM)
@@ -374,6 +390,47 @@ def debug_keys():
                         // Price in DOM
                         var priceEl = document.querySelector('[class*="price"],[itemprop="price"]');
                         out.domPrice = priceEl ? priceEl.textContent.trim().substring(0,30) : '';
+
+                        // 7. Variant elements in DOM (color/size buttons)
+                        var skuGroups = [];
+                        // Try various selectors for SKU/variant sections
+                        var selectors = [
+                            '[class*="sku-item"]', '[class*="skuItem"]',
+                            '[class*="sku-list"]', '[class*="skuList"]',
+                            '[class*="sku-property"]', '[class*="skuProperty"]',
+                            '[class*="product-sku"]', '[class*="variants"]',
+                            '[data-sku-col]', '[class*="sku"]'
+                        ];
+                        var foundSkuEls = [];
+                        for (var si=0; si<selectors.length; si++) {
+                            var els = document.querySelectorAll(selectors[si]);
+                            if (els.length > 0) {
+                                foundSkuEls.push(selectors[si] + ':' + els.length);
+                            }
+                        }
+                        out.skuDomSelectors = foundSkuEls;
+
+                        // Try to get variant option texts
+                        var optionTexts = [];
+                        var optEls = document.querySelectorAll('[class*="sku"] span, [class*="variant"] span, [class*="option"] span');
+                        for (var oi=0; oi<Math.min(optEls.length,30); oi++) {
+                            var txt = optEls[oi].textContent.trim();
+                            if (txt && txt.length < 50 && txt.length > 0) optionTexts.push(txt);
+                        }
+                        out.optionTexts = optionTexts.slice(0,20);
+
+                        // 8. Script scan for new AE format variants
+                        var scripts2 = document.querySelectorAll('script');
+                        var skuRaw = '';
+                        for (var si2=0; si2<scripts2.length; si2++) {
+                            var st = scripts2[si2].textContent||'';
+                            if (st.indexOf('"color"') > -1 || st.indexOf('"size"') > -1 || st.indexOf('"Color"') > -1 || st.indexOf('"Size"') > -1) {
+                                // show first 500 chars of this script
+                                skuRaw = st.substring(0, 500);
+                                break;
+                            }
+                        }
+                        out.colorSizeScriptSample = skuRaw.substring(0,300);
 
                         return JSON.stringify(out);
                     } catch(e){return JSON.stringify({jsError:e.message});}
