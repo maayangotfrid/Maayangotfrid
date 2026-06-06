@@ -82,7 +82,11 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.sleep(1)
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
-            sb.execute_script("window.scrollTo(0, 0)")
+            # Scroll past 80% to trigger description lazy-load XHR
+            sb.execute_script("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.8))")
+            sb.sleep(3)
+            sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            sb.sleep(2)
 
             result = _try_js_extraction(sb, url)
             if result and result.get("title"):
@@ -207,6 +211,22 @@ _JS_EXTRACTION = """
                 }
             }
             if (result.images.length && result.price !== '0' && result.descUrl) break;
+        }
+
+        // Performance API: capture XHR requests made after scroll (description lazy-load)
+        if (!result.descUrl) {
+            try {
+                var perfEntries = performance.getEntriesByType('resource');
+                for (var pi = 0; pi < perfEntries.length; pi++) {
+                    var peName = perfEntries[pi].name || '';
+                    if (peName.indexOf('aeproductsourcesite') > -1
+                            || (peName.indexOf('desc') > -1 && peName.indexOf('alicdn') > -1)
+                            || (peName.indexOf('description') > -1 && peName.indexOf('alicdn') > -1)) {
+                        result.descUrl = peName;
+                        break;
+                    }
+                }
+            } catch(ePerf) {}
         }
 
         // Description: try lazy iframes
