@@ -80,8 +80,9 @@ def _scrape_with_selenium(url: str) -> dict:
 
             sb.execute_script("window.scrollTo(0, 800)")
             sb.sleep(1)
-            sb.execute_script("window.scrollTo(0, 1500)")
-            sb.sleep(1)
+            sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            sb.sleep(2)
+            sb.execute_script("window.scrollTo(0, 0)")
 
             result = _try_js_extraction(sb, url)
             if result and result.get("title"):
@@ -188,15 +189,26 @@ _JS_EXTRACTION = """
             if (result.images.length && result.price !== '0' && result.descUrl) break;
         }
 
-        // Description: try lazy iframes (don't construct guessed URLs)
+        // Description: try lazy iframes
         if (!result.descUrl) {
             var frames = document.querySelectorAll('iframe');
             for (var fi = 0; fi < frames.length; fi++) {
                 var fsrc = frames[fi].src || frames[fi].getAttribute('data-src') || '';
-                if (fsrc && fsrc.indexOf('aliexpress') === -1 && fsrc.length > 20
-                    && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1)) {
+                if (fsrc && fsrc.length > 20
+                    && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1
+                        || fsrc.indexOf('ae01') > -1 || fsrc.indexOf('ae02') > -1)) {
                     result.descUrl = fsrc; break;
                 }
+            }
+        }
+        // Description: look for it inside any div with description-related class
+        if (!result.descUrl) {
+            var descDivs = document.querySelectorAll(
+                '[class*="description"] iframe, [class*="detail-desc"] iframe, [id*="desc"] iframe'
+            );
+            if (descDivs.length) {
+                var ds = descDivs[0].src || descDivs[0].getAttribute('data-src') || '';
+                if (ds) result.descUrl = ds;
             }
         }
 
