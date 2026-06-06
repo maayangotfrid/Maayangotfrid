@@ -61,6 +61,51 @@ def _fetch_description(desc_url: str) -> str:
     return ""
 
 
+def _build_description(title: str, images: list, variants: list) -> str:
+    """Build a clean RTL Hebrew product description from images + specs.
+
+    Used when AliExpress's lazy-loaded image description can't be captured.
+    Embeds the product gallery images and a specs table from the variants.
+    """
+    import html as _html
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    parts = ['<div style="direction:rtl;text-align:right;font-family:Arial,Helvetica,sans-serif;">']
+
+    if title:
+        parts.append(f'<h2 style="font-size:20px;margin:0 0 12px;">{esc(title)}</h2>')
+
+    # Specs / options table from variants
+    if variants:
+        parts.append('<h3 style="font-size:16px;margin:16px 0 8px;">מאפיינים</h3>')
+        parts.append('<table style="border-collapse:collapse;width:100%;max-width:480px;">')
+        for v in variants:
+            name = esc(v.get("name", ""))
+            vals = esc(", ".join(v.get("values", [])))
+            parts.append(
+                '<tr>'
+                f'<td style="border:1px solid #ddd;padding:8px;font-weight:bold;background:#f7f7f7;">{name}</td>'
+                f'<td style="border:1px solid #ddd;padding:8px;">{vals}</td>'
+                '</tr>'
+            )
+        parts.append('</table>')
+
+    # Gallery images stacked in the description body
+    if images:
+        parts.append('<div style="margin-top:16px;">')
+        for img in images:
+            parts.append(
+                f'<img src="{esc(img)}" alt="{esc(title)}" '
+                'style="display:block;max-width:100%;height:auto;margin:0 auto 10px;" />'
+            )
+        parts.append('</div>')
+
+    parts.append('</div>')
+    return "".join(parts)
+
+
 def scrape_product(url: str) -> dict:
     url = _normalize_url(url)
     if not SELENIUM_AVAILABLE:
@@ -209,27 +254,11 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
             sb.sleep(2)
 
-            diag = {}
-            result = _try_js_extraction(sb, url, diag)
-
-            # Scan live rendered HTML in Python (catches what JS missed)
-            html_live = sb.get_page_source()
-            diag["live_html_len"] = len(html_live)
-
-            if result and result.get("title") and not result.get("description"):
-                desc, found_url = _extract_desc_from_html(html_live)
-                if desc:
-                    result["description"] = desc
-                if found_url:
-                    result["_desc_url"] = found_url
-
+            result = _try_js_extraction(sb, url)
             if result and result.get("title"):
-                result["_path"] = "js"
-                result["_diag"] = diag
-                result["_live_html_len"] = len(html_live)
-                return result
+                return _ensure_description(result)
 
-            html = html_live
+            html = sb.get_page_source()
 
         result = (
             _try_data_from_script(html, url)
@@ -237,12 +266,21 @@ def _scrape_with_selenium(url: str) -> dict:
             or _try_regex_extraction(html, url)
             or _try_html_fallback(html, url)
         )
-        if isinstance(result, dict):
-            result["_path"] = "fallback"
-            result["_diag"] = diag
-        return result
+        return _ensure_description(result)
     except Exception as e:
         return {"status": "error", "message": str(e), "source_url": url}
+
+
+def _ensure_description(result):
+    """Guarantee every scraped product has a description (built from images+specs if empty)."""
+    if isinstance(result, dict) and result.get("title") and not result.get("description"):
+        result["description"] = _build_description(
+            result.get("title", ""),
+            result.get("images", []),
+            result.get("variants", []),
+        )
+        result["_desc_source"] = result.get("_desc_source") or "built"
+    return result
 
 
 _JS_EXTRACTION = """
@@ -370,57 +408,26 @@ _JS_EXTRACTION = """
             if (result.images.length && result.price !== '0' && result.descUrl) break;
         }
 
-        // Performance API: capture XHR requests made after scroll (description lazy-load)
-        if (!result.descUrl) {
-            try {
-                var perfEntries = performance.getEntriesByType('resource');
-                for (var pi = 0; pi < perfEntries.length; pi++) {
-                    var peName = perfEntries[pi].name || '';
-                    if (peName.indexOf('aeproductsourcesite') > -1
-                            || (peName.indexOf('desc') > -1 && peName.indexOf('alicdn') > -1)
-                            || (peName.indexOf('description') > -1 && peName.indexOf('alicdn') > -1)) {
-                        result.descUrl = peName;
-                        break;
-                    }
-                }
-            } catch(ePerf) {}
-        }
-
-        // Description: scan all iframes in DOM (no URL filter — capture any)
-        if (!result.descUrl) {
-            var frames = document.querySelectorAll('iframe');
-            result.iframesFound = [];
-            for (var fi = 0; fi < frames.length; fi++) {
-                var fsrc = frames[fi].src || frames[fi].getAttribute('src') || frames[fi].getAttribute('data-src') || '';
-                if (fsrc && fsrc.length > 10) {
-                    result.iframesFound.push(fsrc);
-                    if (!result.descUrl) result.descUrl = fsrc;
-                }
-            }
-        }
-        // Description: broader inline DOM scan
+        // Description: only accept inline content that contains real product
+        // images (alicdn CDN). Empty placeholder wrappers are ignored — the
+        // description is built Python-side from images+specs when not found.
         if (!result.desc) {
             var descSelectors = [
-                '[class*="desc-content"]', '[class*="description-content"]',
-                '[class*="product-description"]', '[class*="detail-desc-content"]',
-                '[class*="pdp-comp-product-description"]', '[id*="product-description"]',
-                '[class*="description"]', '[class*="detail-desc"]',
-                '[class*="product-detail"]', '[class*="item-description"]'
+                '#product-description', '[id*="product-description"]',
+                '[class*="detail-desc-decorate"]', '[class*="detailmodule_html"]',
+                '[class*="description--wrap"]', '[class*="product-description"]'
             ];
             for (var dsi = 0; dsi < descSelectors.length; dsi++) {
                 var descEls = document.querySelectorAll(descSelectors[dsi]);
                 for (var dei = 0; dei < descEls.length; dei++) {
                     var deHtml = descEls[dei].innerHTML || '';
-                    if (deHtml.length > 300) { result.desc = deHtml.substring(0, 60000); break; }
+                    if (deHtml.length > 300 && deHtml.indexOf('alicdn') > -1) {
+                        result.desc = deHtml.substring(0, 60000); break;
+                    }
                 }
                 if (result.desc) break;
             }
         }
-
-        // (Description from script tags is handled Python-side via full HTML scan)
-
-        // Debug: count performance resource entries (lightweight)
-        try { result.perfCount = performance.getEntriesByType('resource').length; } catch(eP2) { result.perfCount = -1; }
 
         // Variants: parse span texts using "NAME: VALUE" label pattern
         // This is the most reliable approach for new AliExpress React pages
@@ -497,38 +504,22 @@ def _try_js_extraction(sb, url: str, diag: dict | None = None) -> dict | None:
             if values:
                 variants.append({"name": name, "values": values})
 
-        description = data.get("desc", "")
-        desc_url = data.get("descUrl", "")
-        if not description and desc_url:
-            description = _fetch_description(desc_url)
+        clean_images = [i for i in images if i][:20]
 
-        # Last resort: try fetching description directly by product ID
-        if not description and not desc_url:
-            m = re.search(r'/item/(\d+)', url)
-            if m:
-                pid = m.group(1)
-                for tmpl in [
-                    f"https://aeproductsourcesite.alicdn.com/product/description/pc/v2/en_US/desc.htm?productId={pid}",
-                    f"https://www.aliexpress.com/api/goods/productDescription?productId={pid}",
-                ]:
-                    desc_url = tmpl
-                    description = _fetch_description(tmpl)
-                    if description:
-                        break
-                else:
-                    desc_url = ""
+        # Description: prefer the real inline AliExpress description (if it had
+        # alicdn images). Otherwise build a clean listing from images + specs.
+        description = data.get("desc", "")
+        desc_source = "aliexpress_inline" if description else ""
+        if not description:
+            description = _build_description(title, clean_images, variants)
+            desc_source = "built"
 
         return {
             "title": title,
             "description": description,
             "price": price,
-            "_desc_url": desc_url,
-            "_all_iframes": data.get("iframesFound", []),
-            "_captured_iframes": data.get("allIframes", []),
-            "_perf_urls": data.get("perfUrls", [])[:5],
-            "_perf_count": data.get("perfCount", -1),
-            "_live_html_len": data.get("liveHtmlLen", 0),
-            "images": [i for i in images if i][:20],
+            "_desc_source": desc_source,
+            "images": clean_images,
             "variants": variants,
             "source_url": url,
             "status": "ok",
