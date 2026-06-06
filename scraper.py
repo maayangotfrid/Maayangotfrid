@@ -423,24 +423,8 @@ _JS_EXTRACTION = """
             }
         }
 
-        // Debug: capture all performance resource URLs (unfiltered)
-        try {
-            var perfAll = performance.getEntriesByType('resource');
-            result.perfCount = perfAll.length;
-            result.perfUrls = perfAll.map(function(e){return e.name;}).slice(0, 20);
-        } catch(eP2) { result.perfUrls = []; result.perfCount = -1; }
-
-        // Scan live HTML for description URL patterns
-        try {
-            var liveHtml = document.documentElement.outerHTML;
-            var aeMatch = liveHtml.match(/aeproductsourcesite[^\s"'<>\\]{10,200}/);
-            if (aeMatch) result.descUrl = aeMatch[0].replace(/\\u002F/g, '/').replace(/\\\//g, '/');
-            if (!result.descUrl) {
-                var duMatch = liveHtml.match(/"descriptionUrl"\s*:\s*"([^"]+)"/);
-                if (duMatch) result.descUrl = duMatch[1].replace(/\\\//g, '/');
-            }
-            result.liveHtmlLen = liveHtml.length;
-        } catch(eLH) {}
+        // Debug: count performance resource entries (lightweight)
+        try { result.perfCount = performance.getEntriesByType('resource').length; } catch(eP2) { result.perfCount = -1; }
 
         // Variants: parse span texts using "NAME: VALUE" label pattern
         // This is the most reliable approach for new AliExpress React pages
