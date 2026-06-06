@@ -288,14 +288,34 @@ def debug_desc_url():
         m = _re.search(r'/item/(\d+)', url)
         item_id = m.group(1) if m else ""
         norm = f"https://www.aliexpress.com/item/{item_id}.html" if item_id else url
+        poll = []
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(norm)
             sb.sleep(4)
             sb.set_window_size(1920, 1080)
-            sb.execute_script("window.scrollTo(0, document.body.scrollHeight)")
-            sb.sleep(3)
-            sb.execute_script("window.scrollTo(0, Math.floor(document.body.scrollHeight*0.85))")
-            sb.sleep(3)
+
+            # Gradual human-like scroll to trigger lazy-load on description
+            for frac in [0.3, 0.5, 0.65, 0.8, 0.9, 1.0]:
+                sb.execute_script(f"window.scrollTo(0, Math.floor(document.body.scrollHeight*{frac}))")
+                sb.sleep(1.2)
+
+            # Scroll the description element directly into view, then poll its content
+            for attempt in range(6):
+                state = sb.execute_script(r"""
+                    (function() {
+                        var el = document.querySelector('#product-description')
+                              || document.querySelector('[id*="product-description"]')
+                              || document.querySelector('[class*="description--wrap"]');
+                        if (el) el.scrollIntoView({block:'center'});
+                        var len = el ? (el.innerHTML||'').length : -1;
+                        var imgs = el ? el.querySelectorAll('img').length : -1;
+                        var ifr = el ? el.querySelectorAll('iframe').length : -1;
+                        return JSON.stringify({len: len, imgs: imgs, ifr: ifr});
+                    })();
+                """)
+                poll.append(state)
+                sb.sleep(1.5)
+
             html = sb.get_page_source()
 
             # Find the description container and its lazy-loaded images in the DOM
@@ -336,11 +356,10 @@ def debug_desc_url():
             dom = {"raw": str(dom_info)[:500]}
 
         found = {}
+        found["poll"] = poll
         found["containers"] = dom.get("containers", [])
         found["desc_image_count"] = len(dom.get("descImages", []))
         found["desc_images_sample"] = dom.get("descImages", [])[:8]
-        found["desc_htm"] = list(set(_re.findall(
-            r'https?:[\\/]*[^\s"\'<>]*desc\.htm[^\s"\'<>]*', html)))[:5]
         found["html_len"] = len(html)
         found["item_id"] = item_id
         return jsonify(found)
