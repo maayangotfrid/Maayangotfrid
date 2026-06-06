@@ -288,60 +288,92 @@ def debug_keys():
         url = f"https://www.aliexpress.com/item/{m.group(1)}.html" if m else url
         with SB(uc=True, headless=True, locale_code="en") as sb:
             sb.open(url)
-            sb.sleep(6)
+            sb.sleep(3)
+            sb.execute_script("window.scrollTo(0, 600)")
+            sb.sleep(4)
+            sb.execute_script("window.scrollTo(0, 1200)")
+            sb.sleep(3)
             r = sb.execute_script("""
                 (function() {
                     try {
                         var out = {};
 
-                        // Check window.runParams
+                        // 1. window.runParams
                         var rp = window.runParams || {};
                         out.rpKeys = Object.keys(rp).slice(0,20);
+                        if (rp.data) out.rpDataKeys = Object.keys(rp.data).slice(0,20);
 
-                        // Check __NEXT_DATA__
+                        // 2. Other known AliExpress globals
+                        var knownGlobals = ['__g_AEM_data','__INITIAL_DATA__','PAGE_INIT_DATA',
+                            '_dida_config_','__aer_data','__page_data__','window._aElectronData',
+                            'productData','itemData','__APP_DATA__'];
+                        out.foundGlobals = [];
+                        for (var gi=0; gi<knownGlobals.length; gi++) {
+                            if (window[knownGlobals[gi]]) out.foundGlobals.push(knownGlobals[gi]);
+                        }
+
+                        // 3. All window keys that look like data (objects, not functions/DOM)
+                        out.windowDataKeys = Object.keys(window).filter(function(k){
+                            try {
+                                var v=window[k];
+                                return v && typeof v==='object' && !Array.isArray(v)
+                                    && !(v instanceof Element) && !(v instanceof Window)
+                                    && Object.keys(v).length > 2 && k[0] !== '_' && k !== 'document';
+                            } catch(e){return false;}
+                        }).slice(0,30);
+
+                        // 4. __NEXT_DATA__
                         var nd = document.getElementById('__NEXT_DATA__');
                         out.hasNextData = !!nd;
                         if (nd) {
                             try {
-                                var ndParsed = JSON.parse(nd.textContent);
-                                out.ndKeys = Object.keys(ndParsed).slice(0,10);
-                                var pp = (ndParsed.props||{}).pageProps||{};
+                                var ndP = JSON.parse(nd.textContent);
+                                out.ndKeys = Object.keys(ndP).slice(0,10);
+                                var pp = (ndP.props||{}).pageProps||{};
                                 out.ppKeys = Object.keys(pp).slice(0,20);
-                                var id2 = pp.initialData||pp.data||{};
-                                out.idKeys = Object.keys(id2).slice(0,20);
-                            } catch(e2){ out.ndParseErr = e2.message; }
+                            } catch(e2){ out.ndErr = e2.message; }
                         }
 
-                        // Scan all script tags for known AE keys
+                        // 5. Script tag scan
                         var scripts = document.querySelectorAll('script');
-                        var foundTitle = '', foundPrice = '', foundImgLen = 0, foundSkuLen = 0;
+                        var fTitle='', fPrice='', fImgLen=0, fSkuLen=0, fDescUrl='';
                         for (var i=0; i<scripts.length; i++) {
                             var t = scripts[i].textContent||'';
-                            if (!foundTitle && t.indexOf('titleModule') > -1) {
-                                var tm = t.match(/"subject":"([^"]{5,200})"/);
-                                if (tm) foundTitle = tm[1];
+                            if (!fTitle && t.indexOf('subject') > -1) {
+                                var tm = t.match(/"subject"\s*:\s*"([^"]{5,200})"/);
+                                if (tm) fTitle = tm[1];
                             }
-                            if (!foundPrice && t.indexOf('formatedPrice') > -1) {
-                                var pm2 = t.match(/"formatedPrice":"([^"]+)"/);
-                                if (pm2) foundPrice = pm2[1];
+                            if (!fPrice) {
+                                var pm2 = t.match(/"formatedPrice"\s*:\s*"([^"]+)"/)||t.match(/"salePrice"\s*:\s*"([^"]+)"/)||t.match(/"price"\s*:\s*"([^"]+)"/);
+                                if (pm2) fPrice = pm2[1];
                             }
-                            if (!foundImgLen && t.indexOf('imagePathList') > -1) {
-                                var im2 = t.match(/"imagePathList":\[([^\]]+)\]/);
-                                if (im2) foundImgLen = (im2[1].match(/https/g)||[]).length;
+                            if (!fImgLen && t.indexOf('imagePathList') > -1) {
+                                var im2 = t.match(/"imagePathList"\s*:\s*\[([^\]]+)\]/);
+                                if (im2) fImgLen = (im2[1].match(/https/g)||[]).length;
                             }
-                            if (!foundSkuLen && t.indexOf('productSKUPropertyList') > -1) {
-                                foundSkuLen = (t.match(/"skuPropertyName"/g)||[]).length;
+                            if (!fSkuLen && t.indexOf('SKU') > -1) {
+                                fSkuLen = (t.match(/"skuPropertyName"/g)||[]).length;
+                            }
+                            if (!fDescUrl && t.indexOf('descriptionUrl') > -1) {
+                                var du = t.match(/"descriptionUrl"\s*:\s*"([^"]+)"/);
+                                if (du) fDescUrl = du[1];
                             }
                         }
-                        out.scriptTitle = foundTitle;
-                        out.scriptPrice = foundPrice;
-                        out.scriptImgLen = foundImgLen;
-                        out.scriptSkuLen = foundSkuLen;
+                        out.scriptTitle = fTitle;
+                        out.scriptPrice = fPrice;
+                        out.scriptImgLen = fImgLen;
+                        out.scriptSkuLen = fSkuLen;
+                        out.scriptDescUrl = fDescUrl;
 
-                        // Check page title and meta
+                        // 6. DOM extraction
                         out.pageTitle = document.title;
-                        var metaDesc = document.querySelector('meta[name="description"]');
-                        out.metaDesc = metaDesc ? metaDesc.content.substring(0,100) : '';
+                        var h1 = document.querySelector('h1');
+                        out.h1 = h1 ? h1.textContent.trim().substring(0,100) : '';
+                        var mDesc = document.querySelector('meta[name="description"]');
+                        out.metaDesc = mDesc ? mDesc.content.substring(0,150) : '';
+                        // Price in DOM
+                        var priceEl = document.querySelector('[class*="price"],[itemprop="price"]');
+                        out.domPrice = priceEl ? priceEl.textContent.trim().substring(0,30) : '';
 
                         return JSON.stringify(out);
                     } catch(e){return JSON.stringify({jsError:e.message});}
