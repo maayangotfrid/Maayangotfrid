@@ -372,13 +372,24 @@ _JS_EXTRACTION = """
             }
         }
 
-        // Debug: capture all performance resource URLs
+        // Debug: capture all performance resource URLs (unfiltered)
         try {
             var perfAll = performance.getEntriesByType('resource');
-            result.perfUrls = perfAll.map(function(e){return e.name;}).filter(function(n){
-                return n && (n.indexOf('alicdn') > -1 || n.indexOf('aliexpress') > -1 || n.indexOf('desc') > -1);
-            }).slice(0, 30);
-        } catch(eP2) { result.perfUrls = []; }
+            result.perfCount = perfAll.length;
+            result.perfUrls = perfAll.map(function(e){return e.name;}).slice(0, 20);
+        } catch(eP2) { result.perfUrls = []; result.perfCount = -1; }
+
+        // Scan live HTML for description URL patterns
+        try {
+            var liveHtml = document.documentElement.outerHTML;
+            var aeMatch = liveHtml.match(/aeproductsourcesite[^\s"'<>\\]{10,200}/);
+            if (aeMatch) result.descUrl = aeMatch[0].replace(/\\u002F/g, '/').replace(/\\\//g, '/');
+            if (!result.descUrl) {
+                var duMatch = liveHtml.match(/"descriptionUrl"\s*:\s*"([^"]+)"/);
+                if (duMatch) result.descUrl = duMatch[1].replace(/\\\//g, '/');
+            }
+            result.liveHtmlLen = liveHtml.length;
+        } catch(eLH) {}
 
         // Variants: parse span texts using "NAME: VALUE" label pattern
         // This is the most reliable approach for new AliExpress React pages
@@ -450,6 +461,22 @@ def _try_js_extraction(sb, url: str) -> dict | None:
         if not description and desc_url:
             description = _fetch_description(desc_url)
 
+        # Last resort: try fetching description directly by product ID
+        if not description and not desc_url:
+            m = re.search(r'/item/(\d+)', url)
+            if m:
+                pid = m.group(1)
+                for tmpl in [
+                    f"https://aeproductsourcesite.alicdn.com/product/description/pc/v2/en_US/desc.htm?productId={pid}",
+                    f"https://www.aliexpress.com/api/goods/productDescription?productId={pid}",
+                ]:
+                    desc_url = tmpl
+                    description = _fetch_description(tmpl)
+                    if description:
+                        break
+                else:
+                    desc_url = ""
+
         return {
             "title": title,
             "description": description,
@@ -457,7 +484,9 @@ def _try_js_extraction(sb, url: str) -> dict | None:
             "_desc_url": desc_url,
             "_all_iframes": data.get("iframesFound", []),
             "_captured_iframes": data.get("allIframes", []),
-            "_perf_urls": data.get("perfUrls", []),
+            "_perf_urls": data.get("perfUrls", [])[:5],
+            "_perf_count": data.get("perfCount", -1),
+            "_live_html_len": data.get("liveHtmlLen", 0),
             "images": [i for i in images if i][:20],
             "variants": variants,
             "source_url": url,
