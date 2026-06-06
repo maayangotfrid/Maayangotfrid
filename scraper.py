@@ -49,6 +49,10 @@ def _fetch_description(desc_url: str) -> str:
         if not r.ok:
             return ""
         html = r.text
+        # Reject 404/error pages
+        if any(x in html for x in ['page-not-found', '404 page', "can't find that page",
+                                     'Sorry, we can', 'error page']):
+            return ""
         html = re.sub(r'src=["\']\/\/', 'src="https://', html)
         html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.I)
         return html
@@ -155,7 +159,7 @@ _JS_EXTRACTION = """
         var h1el = document.querySelector('h1');
         result.title = h1el ? h1el.textContent.trim() : '';
 
-        // Price + images + descUrl from inline script tags
+        // Price + images from inline script tags
         var scripts = document.querySelectorAll('script');
         for (var si = 0; si < scripts.length; si++) {
             var st = scripts[si].textContent || '';
@@ -168,69 +172,61 @@ _JS_EXTRACTION = """
                        || st.match(/"salePrice"\\s*:\\s*"([\\d.]+)"/);
                 if (pm2) result.price = pm2[1];
             }
-            if (!result.descUrl) {
-                var du = st.match(/"descriptionUrl"\\s*:\\s*"([^"]+)"/);
-                if (du) result.descUrl = du[1].replace(/\\\\\\//g, '/');
+            // descriptionUrl: use indexOf to avoid regex escaping issues
+            if (!result.descUrl && st.indexOf('descriptionUrl') > -1) {
+                var duIdx = st.indexOf('"descriptionUrl"');
+                if (duIdx > -1) {
+                    var duAfter = st.substring(duIdx + 17, duIdx + 317);
+                    var duQ1 = duAfter.indexOf('"');
+                    if (duQ1 > -1) {
+                        var duRaw = duAfter.substring(duQ1 + 1, duAfter.indexOf('"', duQ1 + 1));
+                        // Remove JSON-escaped slashes (\/)
+                        result.descUrl = duRaw.replace(/\\\//g, '/');
+                    }
+                }
             }
             if (result.images.length && result.price !== '0' && result.descUrl) break;
         }
 
-        // Description URL via lazy iframe
+        // Description: try lazy iframes (don't construct guessed URLs)
         if (!result.descUrl) {
             var frames = document.querySelectorAll('iframe');
             for (var fi = 0; fi < frames.length; fi++) {
                 var fsrc = frames[fi].src || frames[fi].getAttribute('data-src') || '';
-                if (fsrc && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1)) {
+                if (fsrc && fsrc.indexOf('aliexpress') === -1 && fsrc.length > 20
+                    && (fsrc.indexOf('desc') > -1 || fsrc.indexOf('alicdn') > -1)) {
                     result.descUrl = fsrc; break;
                 }
             }
         }
-        // Description URL via AliExpress API pattern
-        if (!result.descUrl) {
-            var iM = window.location.href.match(/\\/item\\/(\\d+)/);
-            if (iM) result.descUrl = 'https://ae-goods.aliexpress.com/pc/detail/description/' + iM[1] + '.html';
-        }
 
-        // Variants from DOM property rows
+        // Variants: parse span texts using "NAME: VALUE" label pattern
+        // This is the most reliable approach for new AliExpress React pages
         if (!result.variants.length) {
-            var propRows = document.querySelectorAll(
-                '[class*="sku-item--property"], [class*="skuProperty--"], [class*="product-sku--property"]'
-            );
-            for (var ri = 0; ri < propRows.length; ri++) {
-                var nameEl = propRows[ri].querySelector(
-                    '[class*="sku-item--title"], [class*="title--"], [class*="property-title"]'
-                );
-                var rname = nameEl
-                    ? nameEl.textContent.replace(/[:\\uff1a]\\s*.*/g, '').trim()
-                    : ('Option ' + (ri + 1));
-                var valEls = propRows[ri].querySelectorAll(
-                    '[class*="sku-item--sku"], [class*="skuPropertyItem"], [data-sku-col]'
-                );
-                var vals = [];
-                for (var vei = 0; vei < valEls.length; vei++) {
-                    var v = (valEls[vei].getAttribute('title') || valEls[vei].textContent)
-                                .trim().replace(/[:\\uff1a]\\s*.*/g, '').trim();
-                    if (v && v.length < 50 && vals.indexOf(v) === -1) vals.push(v);
+            var allSkuSpans = document.querySelectorAll('[class*="sku"] span');
+            var curGrpName = null, curGrpVals = [];
+            for (var osi = 0; osi < allSkuSpans.length; osi++) {
+                var otxt = allSkuSpans[osi].textContent.trim();
+                if (!otxt || otxt.length > 80) continue;
+                // Stop at combined selection display (e.g. "Color: Black, Size: 36")
+                if (otxt.indexOf(',') > -1 && otxt.indexOf(':') > -1) break;
+                // Detect label: "NAME: currentValue" — colon followed by non-breaking space
+                var colonIdx = otxt.indexOf(':');
+                var nbspIdx = otxt.indexOf(' ');
+                if (colonIdx > 0 && nbspIdx === colonIdx + 1) {
+                    // Save previous group
+                    if (curGrpName && curGrpVals.length > 0) {
+                        result.variants.push({n: curGrpName, v: curGrpVals});
+                    }
+                    curGrpName = otxt.substring(0, colonIdx).trim();
+                    curGrpVals = [];
+                } else if (curGrpName && colonIdx === -1 && otxt.length <= 30) {
+                    // Plain text with no colon = an option value
+                    if (curGrpVals.indexOf(otxt) === -1) curGrpVals.push(otxt);
                 }
-                if (vals.length) result.variants.push({n: rname, v: vals});
             }
-
-            // Fallback: group [data-sku-col] elements by column index
-            if (!result.variants.length) {
-                var skuEls = document.querySelectorAll('[data-sku-col]');
-                var colMap = {}, colOrder = [];
-                for (var ci = 0; ci < skuEls.length; ci++) {
-                    var col = skuEls[ci].getAttribute('data-sku-col');
-                    var lbl = (skuEls[ci].getAttribute('title') || skuEls[ci].textContent)
-                                  .trim().replace(/[:\\uff1a]\\s*.*/g, '').trim();
-                    if (!lbl || lbl.length > 50) continue;
-                    if (!colMap[col]) { colMap[col] = []; colOrder.push(col); }
-                    if (colMap[col].indexOf(lbl) === -1) colMap[col].push(lbl);
-                }
-                for (var coi = 0; coi < colOrder.length; coi++) {
-                    var c2 = colOrder[coi];
-                    if (colMap[c2].length) result.variants.push({n: 'Option ' + (parseInt(c2) + 1), v: colMap[c2]});
-                }
+            if (curGrpName && curGrpVals.length > 0) {
+                result.variants.push({n: curGrpName, v: curGrpVals});
             }
         }
 
