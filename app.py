@@ -290,24 +290,26 @@ def debug_keys():
             sb.open(url)
             sb.sleep(6)
             r = sb.execute_script("""
-                try {
-                    var rp=window.runParams||{},d=rp.data||{};
-                    var c=d.pageComponent||d.productComponent||rp.pageComponent||{};
-                    var sm=c.skuModule||d.skuModule||{};
-                    var sl=sm.productSKUPropertyList||[];
-                    return JSON.stringify({
-                        rpKeys:Object.keys(rp),
-                        dKeys:Object.keys(d).slice(0,25),
-                        cKeys:Object.keys(c).slice(0,25),
-                        smKeys:Object.keys(sm),
-                        skuLen:sl.length,
-                        firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,300):'empty',
-                        title:(c.titleModule||{}).subject||'',
-                        price:(c.priceModule||{}).formatedActivityPrice||(c.priceModule||{}).formatedPrice||'',
-                        imgLen:((c.imageModule||{}).imagePathList||[]).length,
-                        descUrl:(c.descriptionModule||{}).descriptionUrl||''
-                    });
-                } catch(e){return JSON.stringify({jsError:e.message});}
+                (function() {
+                    try {
+                        var rp=window.runParams||{},d=rp.data||{};
+                        var c=d.pageComponent||d.productComponent||rp.pageComponent||{};
+                        var sm=c.skuModule||d.skuModule||{};
+                        var sl=sm.productSKUPropertyList||[];
+                        return JSON.stringify({
+                            rpKeys:Object.keys(rp),
+                            dKeys:Object.keys(d).slice(0,25),
+                            cKeys:Object.keys(c).slice(0,25),
+                            smKeys:Object.keys(sm),
+                            skuLen:sl.length,
+                            firstSku:sl[0]?JSON.stringify(sl[0]).substring(0,300):'empty',
+                            title:(c.titleModule||{}).subject||'',
+                            price:(c.priceModule||{}).formatedActivityPrice||(c.priceModule||{}).formatedPrice||'',
+                            imgLen:((c.imageModule||{}).imagePathList||[]).length,
+                            descUrl:(c.descriptionModule||{}).descriptionUrl||''
+                        });
+                    } catch(e){return JSON.stringify({jsError:e.message});}
+                })()
             """)
         return jsonify(_j.loads(r) if r else {"result": "null from js"})
     except Exception as e:
