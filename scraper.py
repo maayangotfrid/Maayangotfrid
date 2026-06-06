@@ -130,6 +130,46 @@ _JS_INJECT_INTERCEPTOR = """
 """
 
 
+def _extract_desc_from_html(html: str) -> tuple[str, str]:
+    """Search live rendered HTML for description URL or inline content. Returns (html_content, url)."""
+    # 1. aeproductsourcesite URL (with or without key/token)
+    m = re.search(r'https?://aeproductsourcesite[^\s"\'<>\\]{5,300}', html)
+    if not m:
+        # Try escaped form: "https:\/\/aeproductsourcesite..."
+        m = re.search(r'https?:\\/\\/aeproductsourcesite[^\s"\'<>]{5,300}', html)
+    if m:
+        du = m.group(0).replace('\\/', '/').replace('\\u002F', '/')
+        return _fetch_description(du), du
+
+    # 2. "descriptionUrl" in JSON
+    m = re.search(r'"descriptionUrl"\s*:\s*"([^"]{10,})"', html)
+    if m:
+        du = m.group(1).replace('\\/', '/').replace('\\u002F', '/')
+        return _fetch_description(du), du
+
+    # 3. key + token embedded near productId (construct the URL)
+    pid_m = re.search(r'productId["\s:=]+(\d{10,})', html)
+    key_m = re.search(r'"(?:descriptionKey|key)"\s*:\s*"([a-zA-Z0-9_\-]{10,})"', html)
+    tok_m = re.search(r'"(?:descriptionToken|token)"\s*:\s*"([a-zA-Z0-9_\-]{10,})"', html)
+    if pid_m and key_m and tok_m:
+        pid, key, tok = pid_m.group(1), key_m.group(1), tok_m.group(1)
+        du = (f"https://aeproductsourcesite.alicdn.com/product/description/pc/v2/en_US/"
+              f"desc.htm?productId={pid}&key={key}&token={tok}")
+        return _fetch_description(du), du
+
+    # 4. Try without key/token as last resort
+    pid_m2 = re.search(r'/item/(\d{10,})', html)
+    if pid_m2:
+        pid = pid_m2.group(1)
+        du = (f"https://aeproductsourcesite.alicdn.com/product/description/pc/v2/en_US/"
+              f"desc.htm?productId={pid}")
+        content = _fetch_description(du)
+        if content:
+            return content, du
+
+    return "", ""
+
+
 def _scrape_with_selenium(url: str) -> dict:
     try:
         with SB(uc=True, headless=True, locale_code="en") as sb:
@@ -170,10 +210,21 @@ def _scrape_with_selenium(url: str) -> dict:
             sb.sleep(2)
 
             result = _try_js_extraction(sb, url)
+
+            # Scan live rendered HTML in Python (catches what JS missed)
+            html_live = sb.get_page_source()
+            if result and result.get("title") and not result.get("description"):
+                desc, found_url = _extract_desc_from_html(html_live)
+                if desc:
+                    result["description"] = desc
+                if found_url:
+                    result["_desc_url"] = found_url
+                result["_live_html_len"] = len(html_live)
+
             if result and result.get("title"):
                 return result
 
-            html = sb.get_page_source()
+            html = html_live
 
         result = (
             _try_data_from_script(html, url)
