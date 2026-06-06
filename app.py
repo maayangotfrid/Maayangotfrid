@@ -298,16 +298,49 @@ def debug_desc_url():
             sb.sleep(3)
             html = sb.get_page_source()
 
+            # Find the description container and its lazy-loaded images in the DOM
+            dom_info = sb.execute_script(r"""
+                (function() {
+                    var out = {containers: [], descImages: []};
+                    var sels = [
+                        '#product-description', '[id*="product-description"]',
+                        '[class*="detail-desc-decorate"]', '[class*="description--wrap"]',
+                        '[class*="product-description"]', '[class*="detailmodule_html"]',
+                        '[class*="extend--description"]', '[class*="pdp-comp-product-description"]',
+                        '[class*="ProductDescription"]'
+                    ];
+                    var best = null, bestImgs = 0;
+                    for (var i = 0; i < sels.length; i++) {
+                        var els = document.querySelectorAll(sels[i]);
+                        for (var j = 0; j < els.length; j++) {
+                            var imgs = els[j].querySelectorAll('img');
+                            out.containers.push(sels[i] + ' -> imgs:' + imgs.length + ' htmlLen:' + (els[j].innerHTML||'').length);
+                            if (imgs.length > bestImgs) { best = els[j]; bestImgs = imgs.length; }
+                        }
+                    }
+                    if (best) {
+                        var imgs = best.querySelectorAll('img');
+                        for (var k = 0; k < imgs.length; k++) {
+                            var s = imgs[k].src || imgs[k].getAttribute('data-src') || imgs[k].getAttribute('src') || '';
+                            if (s && s.length > 10 && s.indexOf('data:') !== 0) out.descImages.push(s);
+                        }
+                    }
+                    return JSON.stringify(out);
+                })();
+            """)
+
+        import json as _json
+        try:
+            dom = _json.loads(dom_info) if dom_info else {}
+        except Exception:
+            dom = {"raw": str(dom_info)[:500]}
+
         found = {}
+        found["containers"] = dom.get("containers", [])
+        found["desc_image_count"] = len(dom.get("descImages", []))
+        found["desc_images_sample"] = dom.get("descImages", [])[:8]
         found["desc_htm"] = list(set(_re.findall(
             r'https?:[\\/]*[^\s"\'<>]*desc\.htm[^\s"\'<>]*', html)))[:5]
-        found["aeproductsourcesite"] = list(set(_re.findall(
-            r'aeproductsourcesite[^\s"\'<>]{0,200}', html)))[:5]
-        found["descriptionUrl_keys"] = list(set(_re.findall(
-            r'"descriptionUrl"\s*:\s*"([^"]{5,200})"', html)))[:5]
-        found["any_description_url"] = list(set(_re.findall(
-            r'https?:[\\/]*[^\s"\'<>]*[Dd]escription[^\s"\'<>]*', html)))[:8]
-        found["has_descriptionKey"] = 'descriptionKey' in html
         found["html_len"] = len(html)
         found["item_id"] = item_id
         return jsonify(found)
